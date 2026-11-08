@@ -20,3 +20,4 @@ merging:
   density: 0.2
   majority_sign_election: true
   normalize_weights: true
+

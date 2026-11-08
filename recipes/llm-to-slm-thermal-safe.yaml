@@ -15,3 +15,4 @@ memory_budget:
   max_system_vram_ratio: 0.70  # Leave >= 30% VRAM free for browser/OS
   eviction_policy: "heavy_hitter_h2o"
   kv_compression_ratio: 4.0
+

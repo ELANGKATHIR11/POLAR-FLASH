@@ -247,3 +247,4 @@ POLAR-FLASH is open-source software licensed under the **[Apache License 2.0](LI
 <div align="center">
 Built by <b>Kathir</b> (<a href="https://github.com/ELANGKATHIR11">@ELANGKATHIR11</a>) · Zenith AI
 </div>
+

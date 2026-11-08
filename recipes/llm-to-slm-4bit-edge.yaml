@@ -21,3 +21,4 @@ hardware:
   max_vram_gb: 3.5
   duty_cycle_sleep_ms: 10
   thermal_limit_celsius: 75
+
