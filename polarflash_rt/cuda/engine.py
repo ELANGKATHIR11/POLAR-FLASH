@@ -20,12 +20,17 @@ from polarflash_rt.cpu.engine import PolarLinearLayer
 class PFlashCUDAEngine:
     """
     High-performance CUDA runtime for POLAR-FLASH.
-    Offloads compute-heavy transformer projections to NVIDIA GPUs with streaming transfers.
+    Execution Architecture:
+    - 2-Stage Execution: On-the-fly dequantization of packed .pflash weights followed by CuBLAS Tensor-Core GEMM.
+    - Transparent Hardware Classification: Weights remain packed in container and host storage,
+      and are unpacked into working VRAM buffers during inference. This is not a low-bit fused kernel.
+    - Pinned memory transfers via CUDA streams.
     """
-    def __init__(self, pflash_path: str, device: str = "cuda:0"):
+    def __init__(self, pflash_path: str, device: str = "cuda:0", keep_cached: bool = True):
         self.pflash_path = pflash_path
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.reader = PFlashReader(pflash_path)
+        self.keep_cached = keep_cached
         self.layers: Dict[str, PolarLinearLayer] = {}
         self.stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
         self._build_layers()
@@ -42,7 +47,8 @@ class PFlashCUDAEngine:
                     out_features=out_f,
                     dtype=meta["dtype"],
                     quant_meta=meta["quant_meta"],
-                    raw_bytes=tensor_bytes
+                    raw_bytes=tensor_bytes,
+                    keep_cached=self.keep_cached
                 )
                 self.layers[tensor_name] = layer
 
@@ -95,16 +101,28 @@ class PFlashCUDAEngine:
         tflops = (flops / max(avg_latency, 1e-6)) / 1e12
 
         vram_used_mb = 0.0
+        vram_peak_mb = 0.0
         if self.device.type == "cuda":
             vram_used_mb = torch.cuda.memory_allocated(device=self.device) / (1024 ** 2)
+            vram_peak_mb = torch.cuda.max_memory_allocated(device=self.device) / (1024 ** 2)
+
+        packed_storage_bytes = len(layer._raw_bytes)
+        unpacked_working_bytes = layer.in_features * layer.out_features * 4  # Float32 elements
 
         return {
             "device": str(self.device),
+            "execution_architecture": "2-stage on-the-fly dequantize + Tensor Core GEMM (PyTorch / CuBLAS)",
+            "is_fused_lowbit_kernel": False,
+            "weights_packed_in_storage": True,
             "layer_evaluated": first_layer_name,
+            "packed_storage_bytes": packed_storage_bytes,
+            "unpacked_working_bytes": unpacked_working_bytes,
+            "compression_ratio": unpacked_working_bytes / max(packed_storage_bytes, 1),
             "average_latency_ms": avg_latency * 1000.0,
             "tokens_per_second": tokens_per_sec,
             "achieved_tflops": tflops,
-            "vram_allocated_mb": vram_used_mb
+            "vram_allocated_mb": vram_used_mb,
+            "vram_peak_mb": vram_peak_mb
         }
 
     def close(self):

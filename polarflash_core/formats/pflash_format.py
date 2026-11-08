@@ -29,8 +29,11 @@ class PFlashWriter:
     into the optimized, memory-mappable .pflash binary format.
     """
     def __init__(self, page_alignment: int = DEFAULT_PAGE_ALIGNMENT):
+        if page_alignment <= 0 or (page_alignment & (page_alignment - 1)) != 0:
+            raise ValueError(f"page_alignment must be a power of 2, got {page_alignment}")
         self.alignment = page_alignment
         self.tensors: List[Dict[str, Any]] = []
+        self._tensor_names: set = set()
         self.metadata: Dict[str, Any] = {}
 
     def set_metadata(self, meta: Dict[str, Any]):
@@ -46,7 +49,14 @@ class PFlashWriter:
     ):
         """
         Registers a raw byte tensor with its quantization metadata.
+        Guarantees uniqueness of tensor names and validates payload integrity.
         """
+        if not name or not isinstance(name, str):
+            raise ValueError("Tensor name must be a non-empty string.")
+        if name in self._tensor_names:
+            raise ValueError(f"Duplicate tensor name '{name}' registered in .pflash archive.")
+
+        self._tensor_names.add(name)
         crc = zlib.crc32(data_bytes)
         self.tensors.append({
             "name": name,
@@ -151,31 +161,78 @@ class PFlashReader:
     """
     Zero-copy Memory-Mapped (mmap) reader for .pflash archives.
     Allows streaming tensor reads without loading the full model into RAM.
+    Provides rigorous checksum validation, file boundary checks, and lifetime tracking.
     """
     def __init__(self, filepath: str):
         self.filepath = filepath
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Archive not found: {filepath}")
+
+        file_size = os.path.getsize(filepath)
+        if file_size < 16:
+            raise ValueError(f"Truncated .pflash file: size is {file_size} bytes (minimum is 16 bytes).")
+
+        self.file_size = file_size
         self.file_obj = open(filepath, "rb")
         self.mm = mmap.mmap(self.file_obj.fileno(), 0, access=mmap.ACCESS_READ)
+        self._closed = False
 
         # Parse preamble
         magic = self.mm[0:4]
         if magic != PFLASH_MAGIC:
+            self.close()
             raise ValueError(f"Invalid .pflash magic bytes: {magic}")
 
         version, alignment, header_len = struct.unpack("<III", self.mm[4:16])
+        if version != PFLASH_VERSION:
+            self.close()
+            raise ValueError(f"Unsupported .pflash format version: {version} (expected {PFLASH_VERSION})")
+
+        if alignment <= 0 or (alignment & (alignment - 1)) != 0:
+            self.close()
+            raise ValueError(f"Invalid .pflash page alignment: {alignment} (must be a power of 2)")
+
+        if 16 + header_len > file_size:
+            self.close()
+            raise ValueError(f"Corrupted .pflash file: header length ({header_len}) extends beyond file size ({file_size})")
+
         self.version = version
         self.alignment = alignment
 
-        # Parse JSON Header
-        header_raw = self.mm[16:16 + header_len].decode("utf-8")
-        header_data = json.loads(header_raw)
-        self.metadata = header_data.get("metadata", {})
-        self.tensor_catalog: Dict[str, Dict[str, Any]] = {
-            t["name"]: t for t in header_data.get("tensors", [])
-        }
+        # Parse JSON Header safely
+        try:
+            header_raw = self.mm[16:16 + header_len].decode("utf-8")
+            header_data = json.loads(header_raw)
+        except Exception as e:
+            self.close()
+            raise ValueError(f"Malformed .pflash header JSON: {e}") from e
 
-    def get_tensor_bytes(self, name: str, verify_checksum: bool = True) -> bytes:
-        """Zero-copy slice of tensor payload from memory map."""
+        self.metadata = header_data.get("metadata", {})
+        tensors_list = header_data.get("tensors", [])
+
+        self.tensor_catalog: Dict[str, Dict[str, Any]] = {}
+        for t in tensors_list:
+            t_name = t["name"]
+            t_offset = t["offset"]
+            t_size = t["size"]
+
+            # Validate tensor boundaries against file size
+            if t_offset + t_size > file_size:
+                self.close()
+                raise ValueError(
+                    f"Corrupted .pflash archive: tensor '{t_name}' payload (offset {t_offset}, size {t_size}) "
+                    f"exceeds file boundary ({file_size})"
+                )
+
+            self.tensor_catalog[t_name] = t
+
+    def _ensure_open(self):
+        if self._closed:
+            raise RuntimeError(f"Operation attempted on closed PFlashReader ({self.filepath})")
+
+    def get_tensor_view(self, name: str, verify_checksum: bool = True) -> memoryview:
+        """Zero-copy memoryview slice of tensor payload from memory map."""
+        self._ensure_open()
         if name not in self.tensor_catalog:
             raise KeyError(f"Tensor '{name}' not found in .pflash archive")
 
@@ -183,19 +240,32 @@ class PFlashReader:
         offset = info["offset"]
         size = info["size"]
 
-        raw_bytes = self.mm[offset:offset + size]
+        view = memoryview(self.mm)[offset:offset + size]
         if verify_checksum:
-            crc = zlib.crc32(raw_bytes)
+            crc = zlib.crc32(view)
             if crc != info["crc32"]:
-                raise ValueError(f"CRC32 mismatch for tensor {name}: expected {info['crc32']}, got {crc}")
+                raise ValueError(f"CRC32 mismatch for tensor '{name}': expected {info['crc32']}, got {crc}")
 
-        return raw_bytes
+        return view
+
+    def get_tensor_bytes(self, name: str, verify_checksum: bool = True) -> bytes:
+        """Returns byte content of tensor payload."""
+        view = self.get_tensor_view(name, verify_checksum=verify_checksum)
+        return bytes(view)
 
     def close(self):
-        if self.mm:
-            self.mm.close()
-        if self.file_obj:
-            self.file_obj.close()
+        if not self._closed:
+            self._closed = True
+            if hasattr(self, "mm") and self.mm:
+                try:
+                    self.mm.close()
+                except Exception:
+                    pass
+            if hasattr(self, "file_obj") and self.file_obj:
+                try:
+                    self.file_obj.close()
+                except Exception:
+                    pass
 
     def __enter__(self):
         return self

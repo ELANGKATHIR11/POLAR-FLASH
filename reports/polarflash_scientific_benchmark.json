@@ -1,0 +1,39 @@
+{
+  "hadamard_incoherence": {
+    "energy_preservation_relative_error": 0.0,
+    "energy_preserved": true,
+    "kurtosis_before": 145.30001831054688,
+    "kurtosis_after": 4.321808815002441,
+    "outlier_rate_before": 0.002368927001953125,
+    "outlier_rate_after": 0.0030107498168945312,
+    "max_outlier_amplitude_before": 4.826338291168213,
+    "max_outlier_amplitude_after": 0.6123602986335754,
+    "outlier_suppression_ratio": 7.881533636223208
+  },
+  "reconstruction": {
+    "int4": {
+      "mse": 1.6454716387670487e-05,
+      "snr_db": 13.854855685227761
+    },
+    "e8_lattice": {
+      "mse": 1.1454982313807704e-06,
+      "snr_db": 25.42781546762017
+    },
+    "polar_quant": {
+      "mse": 6.950419901841087e-06,
+      "snr_db": 17.597653380074124
+    }
+  },
+  "physical_systems": {
+    "page_utilization_U": 1.0,
+    "read_amplification_A": 1.0,
+    "double_buffer_speedup": 1.1267435853280523
+  },
+  "roofline": {
+    "fp16_tflops": 29.12711111111111,
+    "fp16_regime": "Memory Bandwidth Bound",
+    "polar_1_75_tflops": 110.0,
+    "polar_1_75_regime": "Compute Bound",
+    "speedup": 3.7765502929687504
+  }
+}

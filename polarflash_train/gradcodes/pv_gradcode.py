@@ -28,15 +28,24 @@ class PVGradCodeOptimizer:
         discrete_codes: torch.Tensor,
         lr: float = 1e-4,
         p_step_interval: int = 50,
-        rollback_tolerance: float = 0.01,
-        trust_region_radius: float = 0.10
+        rollback_tolerance: float = 0.0,
+        min_improvement: float = 0.0,
+        trust_region_radius: float = 0.10,
+        max_flips: Optional[int] = None,
+        code_min: Optional[int] = -8,
+        code_max: Optional[int] = 7
     ):
         self.continuous_params = [p for p in continuous_params if p.requires_grad]
         self.codes = discrete_codes
         self.lr = lr
         self.p_step_interval = p_step_interval
-        self.rollback_tolerance = rollback_tolerance
+        # Strict monotonic improvement: require L(c_{t+1}) < L(c_t) - min_improvement
+        self.min_improvement = max(0.0, min_improvement)
+        self.rollback_tolerance = rollback_tolerance  # Deprecated tolerance kept for API compatibility
         self.trust_region_radius = trust_region_radius
+        self.max_flips = max_flips
+        self.code_min = code_min
+        self.code_max = code_max
 
         # Continuous optimizer
         self.v_optimizer = torch.optim.AdamW(self.continuous_params, lr=lr, weight_decay=1e-2)
@@ -76,13 +85,14 @@ class PVGradCodeOptimizer:
             "total_training_overhead_mb": total_bytes / (1024 ** 2)
         }
 
-    def v_step(self, loss: torch.Tensor):
+    def v_step(self, loss: torch.Tensor, retain_graph: bool = False):
         """
         Executes continuous V-Step:
         Updates theta while codes c remain frozen.
+        retain_graph defaults to False to prevent autograd graph memory leaks across steps.
         """
         self.v_optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        loss.backward(retain_graph=retain_graph)
         torch.nn.utils.clip_grad_norm_(self.continuous_params, max_norm=1.0)
         self.v_optimizer.step()
         self.step_count += 1
@@ -96,19 +106,25 @@ class PVGradCodeOptimizer:
         topk_fraction: float = 0.05
     ) -> Dict[str, Any]:
         """
-        Executes discrete P-Step:
-        1. Ranks coordinate sensitivity using first-order Taylor approximation:
+        Executes discrete P-Step with strict monotonic descent:
+        1. Evaluates baseline objective L(c_t).
+        2. Ranks coordinate sensitivity using first-order Taylor approximation:
            Delta L_i ~ grad_c L_i * Delta c_i
-        2. Proposes discrete candidate flips within trust-region radius.
-        3. Evaluates objective and rolls back if loss degrades.
+        3. Bounds flips by trust-region radius and max_flips.
+        4. Clamps discrete candidates to [code_min, code_max].
+        5. Enforces strict monotonic descent: L(c_{t+1}) < L(c_t) - min_improvement.
+           Rejects candidate and preserves c_t if loss degrades or fails threshold.
         """
-        current_loss = objective_eval_fn(self.codes)
+        current_loss = float(objective_eval_fn(self.codes))
         n = self.codes.numel()
+
         # Enforce trust region cap
         effective_fraction = min(topk_fraction, self.trust_region_radius)
         k = max(1, int(n * effective_fraction))
+        if self.max_flips is not None:
+            k = min(k, self.max_flips)
 
-        # First-order sensitivity: find coordinates with strongest negative product
+        # First-order sensitivity: find coordinates with strongest predicted reduction
         flat_grad = code_gradient.detach().view(-1)
         flip_dir = -torch.sign(flat_grad)
         predicted_reduction = torch.abs(flat_grad)
@@ -120,11 +136,19 @@ class PVGradCodeOptimizer:
         candidate_flat = candidate_codes.view(-1)
         candidate_flat[topk_indices] += flip_dir[topk_indices].to(candidate_flat.dtype)
 
-        # Objective evaluation
-        candidate_loss = objective_eval_fn(candidate_codes)
+        # Clamp candidate codes to valid discrete alphabet bounds
+        if self.code_min is not None or self.code_max is not None:
+            c_min = float("-inf") if self.code_min is None else float(self.code_min)
+            c_max = float("inf") if self.code_max is None else float(self.code_max)
+            candidate_flat.clamp_(min=c_min, max=c_max)
 
-        # Trust-Region Rollback gate: Accept only if candidate loss improves or within tolerance
-        if candidate_loss <= current_loss * (1.0 + self.rollback_tolerance):
+        # Evaluate objective honestly on candidate
+        candidate_loss = float(objective_eval_fn(candidate_codes))
+
+        # Strict Monotonic Descent: accept iff candidate_loss < current_loss - min_improvement
+        is_strictly_better = (candidate_loss < current_loss - self.min_improvement)
+
+        if is_strictly_better:
             self.codes.copy_(candidate_codes)
             self.accepted_p_updates += 1
             accepted = True

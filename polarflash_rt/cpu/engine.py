@@ -22,6 +22,8 @@ class PolarLinearLayer(nn.Module):
     """
     Quantized Linear Layer backed by POLAR-FLASH weights.
     Reconstructs weights on-demand or maintains a cached decoded buffer.
+    Supports either persistent caching (faster inference) or on-the-fly streaming
+    (minimal working RAM / VRAM footprint).
     """
     def __init__(
         self,
@@ -30,7 +32,8 @@ class PolarLinearLayer(nn.Module):
         dtype: str,
         quant_meta: Dict[str, Any],
         raw_bytes: bytes,
-        bias: Optional[torch.Tensor] = None
+        bias: Optional[torch.Tensor] = None,
+        keep_cached: bool = True
     ):
         super().__init__()
         self.in_features = in_features
@@ -38,6 +41,7 @@ class PolarLinearLayer(nn.Module):
         self.dtype = dtype.lower()
         self.quant_meta = quant_meta
         self.bias = bias
+        self.keep_cached = keep_cached
 
         # Cache dequantized weights in float32 / float16
         self.cached_weight: Optional[torch.Tensor] = None
@@ -67,8 +71,13 @@ class PolarLinearLayer(nn.Module):
                 quant_meta=self.quant_meta
             )
 
-        self.cached_weight = w
+        if self.keep_cached:
+            self.cached_weight = w
         return w.to(device)
+
+    def clear_cache(self):
+        """Frees reconstructed full-precision weight buffer to reclaim RAM / VRAM."""
+        self.cached_weight = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Executes Y = X @ W.T + bias."""

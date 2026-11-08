@@ -101,10 +101,12 @@ class PolarQuant2D:
 
     def forward_transform(self, x1: torch.Tensor, x2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Maps Cartesian pairs to polar (radius, angle)."""
-        r = torch.sqrt(torch.clamp(x1 ** 2 + x2 ** 2, min=1e-24))
+        sum_sq = x1 ** 2 + x2 ** 2
+        zero_mask = (sum_sq <= self.epsilon ** 2)
+        r = torch.sqrt(torch.clamp(sum_sq, min=0.0))
+        r[zero_mask] = 0.0
         theta = torch.atan2(x2, x1)  # in [-pi, pi]
-        # Exact zero-radius safety: angle is uniquely 0.0 when radius is below epsilon
-        zero_mask = (r <= self.epsilon)
+        # Exact zero-radius safety: angle and radius are uniquely 0.0 when below epsilon
         theta[zero_mask] = 0.0
         return r, theta
 
@@ -226,7 +228,10 @@ class RecursivePolarQuant:
         while d > 1:
             left = curr[..., 0::2]
             right = curr[..., 1::2]
-            r = torch.sqrt(torch.clamp(left ** 2 + right ** 2, min=1e-24))
+            sum_sq = left ** 2 + right ** 2
+            zero_mask = (sum_sq <= self.epsilon ** 2)
+            r = torch.sqrt(torch.clamp(sum_sq, min=0.0))
+            r[zero_mask] = 0.0
             if level == 0:
                 # First level: full 4-quadrant angles in [-pi, pi]
                 theta = torch.atan2(right, left)
@@ -234,7 +239,6 @@ class RecursivePolarQuant:
                 # Upper levels: mixing angles between non-negative norms in [0, pi/2]
                 theta = torch.atan2(torch.clamp(right, min=0.0), torch.clamp(left, min=0.0))
 
-            zero_mask = (r <= self.epsilon)
             theta[zero_mask] = 0.0
             angle_levels.append(theta)
 
@@ -279,6 +283,10 @@ class RecursivePolarQuant:
 
         # Quantize top radius: affine scaling
         r_max = torch.max(top_radius)
+        if r_max <= self.epsilon:
+            recon = torch.zeros_like(block)
+            return recon, 0.0
+
         r_scale = max(float(r_max.item()), self.epsilon) / float(self.norm_levels - 1)
         r_q = torch.clamp(torch.round(top_radius / r_scale), 0, self.norm_levels - 1)
         r_hat = r_q * r_scale
@@ -385,6 +393,5 @@ class PolarQuantizer:
         return self.dequantize(codes, metadata)
 
 
-# Backward compatibility alias
-PolarQuantizer = PolarQuant2D
+
 
