@@ -198,3 +198,4 @@ void fused_gemv_int2(
 }
 
 } // namespace polarflash::rt
+

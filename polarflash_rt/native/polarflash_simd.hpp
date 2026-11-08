@@ -79,3 +79,4 @@ void fused_gemv_int2(
 } // namespace polarflash::rt
 
 #endif // POLARFLASH_SIMD_HPP
+

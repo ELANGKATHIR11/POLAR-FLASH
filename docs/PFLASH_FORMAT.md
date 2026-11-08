@@ -116,3 +116,4 @@ with PFlashReader("model.pflash") as reader:
     meta = reader.tensor_catalog["model.layers.0.self_attn.q_proj.weight"]
     w = UnifiedQuantizer.dequantize(tensor_bytes, meta["shape"], meta["dtype"], meta["quant_meta"])
 ```
+

@@ -4,7 +4,44 @@
 
 POLAR-FLASH is a mathematically grounded, physics-aware framework engineered for extreme Large Language Model (LLM) weight compression, sub-2-bit quantization, zero-copy flash streaming, structured activation sparsity, quantized KV-cache compression, and compressed-domain parameter-efficient fine-tuning.
 
+```mermaid
+flowchart TD
+    subgraph INGESTION["1. MODEL INGESTION & CODEC"]
+        A["Pretrained Checkpoints (Safetensors / PyTorch)"] --> B["Architecture Adapter (Llama, Qwen, Mistral, Vision)"]
+        B --> C["Block Randomized Walsh-Hadamard Transform"]
+        C --> D1["Recursive PolarQuant (Radius/Angle Tree)"]
+        C --> D2["E8 Root Lattice VQ (Gosset 240 Roots)"]
+        C --> D3["INT4 / INT3 / INT2 Vectorized Bit-Packing"]
+        C --> D4["FP16 / BF16 Reference Codecs"]
+    end
+
+    subgraph CONTAINER["2. STORAGE & SERIALIZATION"]
+        D1 & D2 & D3 & D4 --> E[".pflash Binary Container Writer"]
+        E --> F["Page Alignment (4096-byte NAND boundary)"]
+        F --> G["Zero-Copy Memory-Mapped Storage (mmap)"]
+        G --> H["CRC32 Numerical Checksum Verification"]
+    end
+
+    subgraph RUNTIME["3. HARDWARE-AWARE EXECUTION RUNTIME"]
+        G --> I["Hardware AutoEngine & HardwareProbe"]
+        I --> J["Thermal Safety Governor (Duty-Cycle Control)"]
+        J --> K1["PFlashCPUEngine (AVX2 SIMD / C++20 Kernels)"]
+        J --> K2["PFlashCUDAEngine (Pinned Buffers / CUDA Streams)"]
+        K1 & K2 --> L1["Flash Streamer (Asynchronous Double-Buffering)"]
+        K1 & K2 --> L2["Compressed KV-Cache (INT8 / 2-Bit Asym)"]
+        K1 & K2 --> L3["Contextual Sparse FFN (SwiGLU Top-K Gather)"]
+    end
+
+    subgraph FINETUNING["4. COMPRESSED-DOMAIN FINE-TUNING"]
+        L1 & L2 & L3 --> M["PV-GradCode Optimizer (Continuous V-Step + Discrete P-Step)"]
+        M --> N1["PolarLoRALinear (Frozen Base + Rank-r Adapters)"]
+        M --> N2["PolarQATLinear (Straight-Through Estimators)"]
+        M --> N3["TIESWeightMerger (Sign-Majority Task Consensus)"]
+    end
 ```
+
+### Complete Dataflow & Memory Hierarchy
+
 +-----------------------------------------------------------------------------------+
 |                              MODEL INGESTION & CODEC                              |
 |   Hugging Face Safetensors / PyTorch Checkpoints (Llama, Qwen, Mistral, Vision)   |
@@ -108,3 +145,4 @@ POLAR-FLASH is a mathematically grounded, physics-aware framework engineered for
   - **P-Step**: Discrete code transitions proposed using first-order sensitivity $\Delta L \approx \nabla_c L^T \Delta c$, bounded by a trust region and gated by a rollback verification check.
 - **`PolarLoRALinear`**: Freezes the underlying quantized weights $W_{\text{base}}$ and attaches rank-$r$ low-rank adapters ($B \times A$), enabling instruction tuning on consumer GPUs with under 4GB VRAM.
 - **`TIESWeightMerger`**: Resolves interference among specialized task vectors using trimming, sign election, and disjoint consensus averaging.
+

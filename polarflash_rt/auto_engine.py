@@ -134,3 +134,4 @@ class AutoEngine:
             )
         else:
             return LOW_SPEC_4GB_DEVICE
+

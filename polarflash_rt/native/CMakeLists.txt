@@ -16,3 +16,4 @@ if(MSVC)
 else()
     target_compile_options(polarflash_rt_native PRIVATE -mavx2 -mfma -O3 -fopenmp)
 endif()
+

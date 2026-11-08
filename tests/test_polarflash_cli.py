@@ -77,3 +77,4 @@ def test_cli_benchmarks_and_run(tmp_path):
     res_ft = run_cli_command("finetune", output_pflash, "--method", "pv-gradcode")
     assert res_ft.returncode == 0
     assert "PV-GradCode convergence verified" in res_ft.stdout
+

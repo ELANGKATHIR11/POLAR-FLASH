@@ -242,3 +242,4 @@ s = \frac{\sum_{i \in \mathcal{I}_k} |e_i|}{k}
 \]
 
 POLAR-FLASH evaluates $1\%$, $3\%$, $5\%$, and $10\%$ sparsity, proving that $5\%$ ternary residuals recover $>82\%$ of low-bit quantization error with minimal storage overhead.
+

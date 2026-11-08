@@ -83,3 +83,4 @@ python -m polarflash_core.cli benchmark-physics
 python -m polarflash_bench.benchmark_suite
 ```
 The benchmark writes full machine-readable results to `reports/polarflash_scientific_benchmark.json`.
+

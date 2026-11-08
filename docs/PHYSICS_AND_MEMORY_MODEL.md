@@ -155,3 +155,4 @@ POLAR-FLASH includes automated memory safety verification gates before model ins
 | **Low-Spec Edge Device** | 4.0 GB | 0.68 GB (3.5B) | 0.50 GB (INT8) | 0.70 GB | 1.88 GB | **FEASIBLE (53% Headroom)** |
 | **RTX 5060 Laptop GPU** | 8.0 GB | 0.68 GB (3.5B) | 0.50 GB (INT8) | 0.70 GB | 1.88 GB | **FEASIBLE (76% Headroom)** |
 | **Extreme 14B on 8GB VRAM** | 8.0 GB | 3.06 GB (14B) | 1.50 GB (2-Bit) | 1.00 GB | 5.56 GB | **FEASIBLE (30% Headroom)** |
+
