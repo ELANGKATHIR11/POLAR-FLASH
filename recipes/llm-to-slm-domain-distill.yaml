@@ -1,0 +1,22 @@
+# POLAR-FLASH Recipe: Decoupled Multi-Adapter Domain Distillation & TIES Merging
+# Fine-tunes specialized domain capabilities without catastrophic forgetting.
+
+recipe_name: "llm-to-slm-domain-distill"
+version: "1.0.0"
+
+training:
+  method: "polar_lora"
+  rank: 16
+  alpha: 32
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  optimizer: "adamw_8bit"
+  learning_rate: 2.0e-4
+  duty_cycle_sleep: 0.05  # 50ms cooldown between microbatches for thermal safety
+
+merging:
+  method: "ties"
+  density: 0.2
+  majority_sign_election: true
+  normalize_weights: true

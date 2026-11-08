@@ -1,0 +1,1436 @@
+<USER_REQUEST>
+# POLAR-FLASH
+## MASTER RESEARCH, MATHEMATICAL ENGINEERING & PRODUCTION IMPLEMENTATION SPECIFICATION
+
+**Project:** POLAR-FLASH  
+**Category:** Extreme Neural Network Compression, Memory-Efficient Inference and Quantized Learning  
+**Primary Goal:** Compress existing pretrained LLMs toward 1.75 effective bits per parameter while minimizing physical storage, active memory, data movement, computational energy and inference latency.
+
+---
+
+# PART I — ROLE AND MISSION
+
+Act as a combined:
+
+- Principal Research Scientist.
+- Information Theory Engineer.
+- Applied Mathematician.
+- Statistical Signal Processing Engineer.
+- Neural Network Quantization Researcher.
+- GPU and CPU Kernel Architect.
+- Memory Systems Architect.
+- Numerical Optimization Scientist.
+- C++ Systems Engineer.
+- Open-Source Infrastructure Architect.
+
+Build POLAR-FLASH as a scientifically defensible, production-grade framework.
+
+Do not merely implement an approximation of the proposed architecture.
+
+Translate the underlying mathematics and physical constraints into executable algorithms, numerical kernels, memory schedulers, binary formats and reproducible experiments.
+
+Every theoretical claim must have:
+
+1. A mathematical definition.
+2. A derivation or supporting assumptions.
+3. An executable implementation.
+4. Numerical verification.
+5. A benchmark.
+6. A documented limitation.
+
+The target of 1.75 bpw is an experimental objective, not a guaranteed outcome.
+
+# PART II — FUNDAMENTAL MATHEMATICAL FOUNDATIONS
+
+## 1. Shannon Rate-Distortion Theory
+
+POLAR-FLASH must treat model compression as an information-theoretic optimization problem.
+
+The objective is not simply to reduce the number of bits.
+
+It is to minimize the information required to represent model parameters while maintaining acceptable functional accuracy.
+
+Let:
+
+- W = original model weights.
+- W_hat = reconstructed quantized weights.
+- R = average encoding rate in bits per weight.
+- D = reconstruction distortion.
+
+Define:
+
+\[
+D=\mathbb{E}\left[\|W-\hat W\|_2^2\right]
+\]
+
+For a distribution of weights, define the rate-distortion function:
+
+\[
+R(D)=\min_{p(\hat W|W):\mathbb E[d(W,\hat W)]\leq D}
+I(W;\hat W)
+\]
+
+where I denotes mutual information.
+
+For a scalar Gaussian source with variance sigma squared and squared-error distortion:
+
+\[
+R(D)=\frac12\log_2\left(\frac{\sigma^2}{D}\right)
+\]
+
+for the applicable distortion range.
+
+This scalar result must not be incorrectly presented as the exact rate-distortion limit of an entire transformer.
+
+For a vector Gaussian source with covariance matrix Sigma:
+
+\[
+R(D)=\frac12\sum_i
+\max\left(0,\log_2\frac{\lambda_i}{\theta}\right)
+\]
+
+where lambda_i are covariance eigenvalues and theta is determined by the distortion constraint.
+
+### Required implementation
+
+Create:
+
+`polarflash_quant/information_theory/rate_distortion.py`
+
+Implement:
+
+- Empirical entropy estimation.
+- Gaussian rate-distortion estimates.
+- Vector-source rate-distortion estimates.
+- Entropy-constrained quantization.
+- Actual serialized bits-per-weight accounting.
+- Distortion-versus-rate curves.
+- Per-layer rate allocation.
+
+The compressor must optimize:
+
+\[
+\min_{\{R_l\}}
+\sum_l D_l(R_l)
+\]
+
+subject to:
+
+\[
+\sum_l N_lR_l\leq B
+\]
+
+where:
+
+- N_l is the parameter count of layer l.
+- R_l is its allocated bitrate.
+- B is the total bit budget.
+
+Use constrained optimization or Lagrangian methods.
+
+A useful objective is:
+
+\[
+\mathcal L=
+\sum_l \alpha_lD_l(R_l)
++\lambda\left(\sum_lN_lR_l-B\right)
+\]
+
+Here alpha_l represents layer sensitivity.
+
+Do not optimize raw weight MSE alone. Also measure the impact on model outputs and language-model loss.
+
+## 2. High-Dimensional Geometry and Gaussian Concentration
+
+Implement orthogonal transforms to reduce outlier concentration and improve low-bit quantization.
+
+For a weight vector:
+
+\[
+w\in\mathbb R^d
+\]
+
+Apply:
+
+\[
+z=Hw
+\]
+
+where H is an orthogonal Hadamard transform:
+
+\[
+H^TH=I
+\]
+
+For normalized Hadamard matrices:
+
+\[
+H_{ij}\in\left\{-\frac1{\sqrt d},
++\frac1{\sqrt d}\right\}
+\]
+
+An orthogonal transform preserves energy:
+
+\[
+\|Hw\|_2^2=\|w\|_2^2
+\]
+
+It also preserves pairwise Euclidean distances.
+
+However, it does not guarantee independent Gaussian transformed coordinates.
+
+### Gaussian shell concentration
+
+For an ideal isotropic Gaussian vector:
+
+\[
+z\sim\mathcal N(0,\sigma^2I_d)
+\]
+
+The squared radius follows:
+
+\[
+\frac{\|z\|_2^2}{\sigma^2}\sim\chi_d^2
+\]
+
+Therefore:
+
+\[
+\mathbb E[\|z\|_2^2]=d\sigma^2
+\]
+
+\[
+\operatorname{Var}(\|z\|_2^2)=2d\sigma^4
+\]
+
+The expected radius is approximately:
+
+\[
+R\approx\sigma\sqrt d
+\]
+
+for large d.
+
+Implement numerical experiments to verify radial concentration on actual transformed model weights.
+
+Do not assume all weight blocks have the same variance or radial distribution.
+
+### Required implementation
+
+Create:
+
+`polarflash_quant/transforms/hadamard.py`
+
+Implement:
+
+- Fast Walsh-Hadamard Transform.
+- Random sign preprocessing.
+- Block-wise transforms.
+- Inverse transform.
+- GPU and CPU versions.
+- Numerical orthogonality tests.
+- Distribution diagnostics.
+
+Measure:
+
+- Kurtosis.
+- Skewness.
+- Outlier frequency.
+- Radial variance.
+- Pairwise correlation.
+- Quantization error before and after rotation.
+
+## 3. Recursive Polar Coordinate Quantization
+
+Develop PolarQuant as an experimental vector quantization method.
+
+For each pair:
+
+\[
+(x_1,x_2)
+\]
+
+calculate:
+
+\[
+r=\sqrt{x_1^2+x_2^2}
+\]
+
+\[
+\theta=\operatorname{atan2}(x_2,x_1)
+\]
+
+Reconstruction:
+
+\[
+x_1=r\cos\theta
+\]
+
+\[
+x_2=r\sin\theta
+\]
+
+For higher-dimensional blocks, recursively decompose subvector norms and angular coordinates.
+
+For a d-dimensional vector, the polar representation consists of one radius and d-1 angular coordinates.
+
+The implementation must correctly handle:
+
+- Zero-radius blocks.
+- Numerical underflow.
+- Angle wrapping.
+- Signed coordinates.
+- Boundary quantization.
+- Scale variation.
+- Inverse reconstruction.
+
+### Polar distortion
+
+For a two-dimensional polar vector:
+
+\[
+x=r
+\begin{bmatrix}
+\cos\theta\\
+\sin\theta
+\end{bmatrix}
+\]
+
+and reconstructed parameters r_hat and theta_hat:
+
+\[
+\|x-\hat x\|_2^2
+=
+r^2+\hat r^2-2r\hat r
+\cos(\theta-\hat\theta)
+\]
+
+For small errors:
+
+\[
+D\approx
+(\Delta r)^2+r^2(\Delta\theta)^2
+\]
+
+This equation must guide adaptive precision allocation.
+
+Angular precision should depend on radius, because the same angular error produces greater reconstruction error for larger radii.
+
+### Codebook optimization
+
+Implement:
+
+- Learned angular codebooks.
+- E8 lattice alternatives.
+- Trellis coding experiments.
+- Vector residual quantization.
+- Entropy coding.
+- Adaptive codebook precision.
+
+Compare:
+
+1. Cartesian scalar quantization.
+2. Hadamard + scalar quantization.
+3. E8 lattice quantization.
+4. Recursive PolarQuant.
+5. PolarQuant + residual correction.
+
+All comparisons must use actual serialized effective bitrate.
+
+Do not claim 1.5 bpw merely because a codebook index uses a nominal number of bits.
+
+## 4. Lattice Quantization
+
+Develop lattice quantization as a separate research backend.
+
+For a lattice Lambda:
+
+\[
+Q_\Lambda(x)=
+\arg\min_{\lambda\in\Lambda}\|x-\lambda\|_2
+\]
+
+The reconstruction is:
+
+\[
+\hat x=sQ_\Lambda(x)
+\]
+
+where s is a scale parameter.
+
+Optimize s by minimizing:
+
+\[
+s^*=
+\arg\min_s
+\sum_i
+\|x_i-sQ_\Lambda(x_i/s)\|_2^2
+\]
+
+Implement E8 lattice operations using mathematically valid lattice constructions.
+
+Test:
+
+- Nearest-lattice-point correctness.
+- Quantization error.
+- Encoding rate.
+- Codebook overhead.
+- Decoder throughput.
+- Numerical stability.
+
+Compare against established lattice quantization implementations.
+
+## 5. Johnson-Lindenstrauss and QJL Residual Correction
+
+Let:
+
+\[
+e=w-\hat w
+\]
+
+be the quantization residual.
+
+Use a randomized projection:
+
+\[
+S\in\{-1,+1\}^{m\times d}
+\]
+
+For independent Rademacher entries:
+
+\[
+\mathbb E[S^TS]=mI
+\]
+
+Therefore, an inner-product estimator can be defined as:
+
+\[
+\widehat{\langle x,e\rangle}
+=
+\frac1m(Sx)^T(Se)
+\]
+
+and:
+
+\[
+\mathbb E[\widehat{\langle x,e\rangle}]
+=
+\langle x,e\rangle
+\]
+
+The full corrected estimate is:
+
+\[
+\widehat{\langle x,w\rangle}
+=
+\langle x,\hat w\rangle
++
+\frac1m(Sx)^T(Se)
+\]
+
+### Required mathematical validation
+
+For fixed x and e, under independent Rademacher projections, analyze the estimator variance.
+
+For the stated unnormalized sign matrix:
+
+\[
+\operatorname{Var}(\hat q)
+=
+\frac1m
+\sum_{i\neq j}x_ie_ix_je_j
+\]
+
+when the relevant random variables are independent and the matrix entries have the specified distribution.
+
+Test this expression against Monte Carlo experiments.
+
+Implement separate variants:
+
+- Dense random projection.
+- Fast structured projection.
+- Sign projection.
+- Packed binary projection.
+- Hardware-specific XNOR/popcount estimation.
+
+Do not assume all variants have the same unbiasedness properties.
+
+Measure projection storage, estimator variance, numerical error and compute overhead.
+
+## 6. Fisher Information and Sparse Ternary Residuals
+
+Estimate diagonal Fisher information:
+
+\[
+F_i=
+\mathbb E_{(x,y)}
+\left[
+\left(
+\frac{\partial\mathcal L}{\partial w_i}
+\right)^2
+\right]
+\]
+
+Rank parameters or parameter blocks by sensitivity.
+
+Construct a sparse residual:
+
+\[
+r_i\in\{-s_i,0,+s_i\}
+\]
+
+with:
+
+\[
+\hat w_i=w_{q,i}+r_i
+\]
+
+Use configurable sparsity.
+
+Test 1%, 3%, 5% and 10% residual allocations.
+
+Optimize the residual scale and selection criterion.
+
+Compare:
+
+- Magnitude-based selection.
+- Fisher-based selection.
+- Hessian-informed approximations where feasible.
+- Gradient-based sensitivity.
+- Random selection.
+
+Report the full index and metadata cost.
+
+## 7. Model-Aware Quantization Objective
+
+The central objective must be functional accuracy rather than weight reconstruction alone.
+
+For calibration samples X:
+
+\[
+\mathcal L_{\text{functional}}
+=
+\mathbb E_X
+\left[
+\|f_W(X)-f_{\hat W}(X)\|_2^2
+\right]
+\]
+
+For language models, additionally measure:
+
+\[
+\mathcal L_{\text{LM}}
+=
+-\sum_t\log p_\theta(x_t|x_{<t})
+\]
+
+Define a combined quantization objective:
+
+\[
+J=
+\alpha D_{\text{weight}}
++\beta D_{\text{activation}}
++\gamma D_{\text{logit}}
++\delta\mathcal L_{\text{LM}}
++\lambda R
+\]
+
+The coefficients must be configurable and calibrated.
+
+Implement block-wise and layer-wise optimization.
+
+---
+
+# PART III — PHYSICAL MEMORY AND BANDWIDTH ENGINEERING
+
+## 8. Memory Hierarchy and Energy Model
+
+POLAR-FLASH must optimize actual data movement, not just theoretical storage size.
+
+Model the memory hierarchy:
+
+1. Registers.
+2. L1 cache.
+3. L2 cache.
+4. Last-level cache.
+5. GPU SRAM/shared memory.
+6. DRAM/VRAM.
+7. NVMe SSD.
+8. NAND Flash.
+
+Use a parameterized energy model:
+
+\[
+E_{\text{total}}=
+E_{\text{compute}}+
+E_{\text{memory}}+
+E_{\text{I/O}}
+\]
+
+More explicitly:
+
+\[
+E_{\text{total}}
+=
+N_{\text{op}}E_{\text{op}}
++
+\sum_j B_j\epsilon_j
++
+N_{\text{IO}}E_{\text{IO}}
+\]
+
+where:
+
+- N_op = operation count.
+- E_op = energy per operation.
+- B_j = transferred bytes at memory level j.
+- epsilon_j = energy per byte at that level.
+- N_IO = storage I/O operation count.
+
+Energy coefficients must be hardware-specific or explicitly labeled estimates.
+
+Do not hardcode a universal energy-per-operation figure.
+
+### Roofline model
+
+Implement the operational-intensity model:
+
+\[
+OI=\frac{\text{FLOPs}}{\text{Bytes transferred}}
+\]
+
+Attainable performance is bounded by:
+
+\[
+P_{\text{attainable}}
+\leq
+\min(P_{\text{peak}},BW_{\text{memory}}\times OI)
+\]
+
+Use this to identify whether inference is:
+
+- Compute-bound.
+- DRAM-bandwidth-bound.
+- VRAM-bandwidth-bound.
+- Storage-bandwidth-bound.
+- Latency-bound.
+
+Generate roofline reports for each backend.
+
+## 9. Memory Footprint and Feasibility Model
+
+For N parameters and effective bitrate b:
+
+\[
+S_{\text{weights}}=\frac{Nb}{8}
+\]
+
+This is only the packed-weight payload.
+
+Actual storage must include:
+
+\[
+S_{\text{total}}=
+S_{\text{weights}}
++S_{\text{scales}}
++S_{\text{codebooks}}
++S_{\text{indices}}
++S_{\text{residuals}}
++S_{\text{metadata}}
+\]
+
+The actual effective bitrate is:
+
+\[
+b_{\text{effective}}=
+\frac{8S_{\text{total}}}{N}
+\]
+
+Runtime memory must be calculated separately:
+
+\[
+M_{\text{peak}}
+=
+M_{\text{resident weights}}
++M_{\text{stream buffers}}
++M_{\text{activations}}
++M_{\text{KV}}
++M_{\text{workspace}}
++M_{\text{runtime}}
+\]
+
+Training memory must additionally include gradients and optimizer states.
+
+Implement a feasibility estimator that rejects configurations exceeding a user-defined memory budget.
+
+Never confuse model file size with required runtime RAM.
+
+## 10. Flash-Page Coalescing
+
+Implement storage-aware parameter layouts.
+
+For page size P, a read request beginning at offset o with length L touches:
+
+\[
+N_{\text{pages}}
+=
+\left\lceil
+\frac{(o\bmod P)+L}{P}
+\right\rceil
+\]
+
+The storage utilization is:
+
+\[
+U=
+\frac{\text{useful requested bytes}}
+{\text{total transferred bytes}}
+\]
+
+Read amplification is:
+
+\[
+A=
+\frac{\text{total bytes transferred}}
+{\text{useful bytes consumed}}
+\]
+
+Optimize U and minimize A.
+
+Implement:
+
+- Configurable page alignment.
+- Sequential tensor bundles.
+- FFN tensor co-location.
+- Layer-based prefetch.
+- Request coalescing.
+- Asynchronous I/O.
+- Read-ahead.
+- Ring buffers.
+
+Do not assume logical 16 KB file blocks correspond directly to physical NAND page operations.
+
+Measure the actual operating-system and storage-device behavior.
+
+## 11. Flash Streaming and Double Buffering
+
+Implement a two-buffer asynchronous streaming engine.
+
+Conceptually:
+
+- Buffer A supplies current compute.
+- Buffer B receives upcoming data.
+- Swap buffers when the next data bundle is ready.
+
+Model the ideal pipeline latency as:
+
+\[
+T_{\text{pipeline}}
+\approx
+\max(T_{\text{compute}},T_{\text{I/O}})
+\]
+
+rather than:
+
+\[
+T_{\text{compute}}+T_{\text{I/O}}
+\]
+
+This approximation assumes sufficient overlap and independent resources.
+
+Implement a scheduler that predicts upcoming tensor requests.
+
+Track:
+
+- Prefetch accuracy.
+- Cache hit rate.
+- I/O wait time.
+- Queue depth.
+- Buffer utilization.
+- Miss penalties.
+- Total token latency.
+
+Support graceful operation when the device cannot sustain the required transfer rate.
+
+## 12. Contextual Sparsity and Lookahead Routing
+
+For an FFN layer:
+
+\[
+h=
+W_{\text{down}}
+\left[
+\phi(W_{\text{gate}}x)
+\odot
+W_{\text{up}}x
+\right]
+\]
+
+Implement activation-aware selection.
+
+Let:
+
+\[
+a_j(x)=
+\phi((W_{\text{gate}}x)_j)
+(W_{\text{up}}x)_j
+\]
+
+Select a subset:
+
+\[
+\mathcal I_k=
+\operatorname{TopK}(|a_j(x)|,k)
+\]
+
+The sparse approximation becomes:
+
+\[
+\hat h=
+W_{\text{down}}[:,\mathcal I_k]
+a_{\mathcal I_k}
+\]
+
+Evaluate output error:
+
+\[
+D_{\text{FFN}}=
+\frac{\|h-\hat h\|_2^2}
+{\|h\|_2^2+\epsilon}
+\]
+
+Develop a predictive router:
+
+\[
+\hat a_{L+1}=P_{\text{route}}(x_L)
+\]
+
+where P_route is a compact learned predictor.
+
+Test prediction accuracy, output distortion and actual speedup.
+
+Compare predictive routing against exact activation-based top-k selection.
+
+Do not claim sparse speedup unless the runtime actually avoids the associated weight reads and computation.
+
+## 13. KV Cache and Long-Context Physics
+
+For a transformer with:
+
+- L layers.
+- T tokens.
+- H_kv key/value heads.
+- D head dimension.
+- q bytes per cache element.
+
+Approximate KV-cache size:
+
+\[
+M_{\text{KV}}=
+2LTH_{\text{kv}}Dq
+\]
+
+For grouped-query attention, use the actual number of KV heads, not the query-head count.
+
+Implement:
+
+- FP16 baseline.
+- INT8 cache.
+- 2-bit cache.
+- Sliding-window cache.
+- Dictionary compression experiments.
+
+Measure:
+
+- Cache memory.
+- Retrieval accuracy.
+- Attention-score error.
+- Per-token latency.
+- Long-context perplexity.
+
+Do not decompress the entire cache if direct compressed-domain computation is possible, but verify the numerical correctness of the alternative.
+
+---
+
+# PART IV — PV-GRADCODE MATHEMATICAL TRAINING ENGINE
+
+## 14. Continuous V-Step
+
+Represent quantized parameters as:
+
+\[
+\hat W(\theta,c)
+\]
+
+where:
+
+- theta contains trainable scales and codebook parameters.
+- c contains discrete code assignments.
+
+During V-step:
+
+\[
+\theta_{t+1}
+=
+\theta_t-\eta\nabla_\theta
+\mathcal L(\hat W(\theta_t,c_t))
+\]
+
+Freeze c during this stage.
+
+Optimize only the continuous quantization parameters.
+
+Implement AdamW or another documented optimizer.
+
+Calculate optimizer-state memory from actual trainable parameter counts and optimizer data types.
+
+## 15. Discrete P-Step
+
+Every K optimization steps, calculate sensitivity to code changes.
+
+For a candidate code change:
+
+\[
+\Delta c_i=c_i'-c_i
+\]
+
+A first-order approximation is:
+
+\[
+\Delta\mathcal L
+\approx
+\nabla_{c_i}\mathcal L^T\Delta c_i
+\]
+
+A second-order approximation may be:
+
+\[
+\Delta\mathcal L
+\approx
+\nabla_{c_i}\mathcal L^T\Delta c_i
++
+\frac12
+\Delta c_i^TH_i\Delta c_i
+\]
+
+where H_i is a suitable Hessian or curvature approximation.
+
+Use the first-order approximation for candidate ranking, but validate selected changes against the actual objective.
+
+Implement:
+
+1. Block sensitivity computation.
+2. Candidate code generation.
+3. Top-k candidate selection.
+4. Objective evaluation.
+5. Accepted code updates.
+6. Rollback on harmful updates.
+
+Do not assume a linearized code update always reduces loss.
+
+## 16. Convergence and Stability
+
+Track:
+
+\[
+\mathcal L_t
+\]
+
+\[
+\|\nabla_\theta\mathcal L_t\|_2
+\]
+
+\[
+\|\theta_{t+1}-\theta_t\|_2
+\]
+
+\[
+\text{Accepted discrete updates}
+\]
+
+\[
+\text{Rejected discrete updates}
+\]
+
+Implement:
+
+- Gradient clipping.
+- Trust regions.
+- Update acceptance criteria.
+- Validation checkpoints.
+- Early stopping.
+- Numerical stability checks.
+
+Any convergence theorem must state its assumptions.
+
+Do not claim a Kurdyka–Łojasiewicz guarantee without a valid proof for the actual optimization procedure.
+
+---
+
+# PART V — JOINT INFORMATION AND PHYSICAL OPTIMIZATION
+
+## 17. The POLAR-FLASH Unified Objective
+
+The framework must optimize compression and physical execution jointly.
+
+Define:
+
+\[
+J=
+\alpha D_{\text{model}}
++\beta R_{\text{storage}}
++\gamma M_{\text{peak}}
++\delta T_{\text{token}}
++\mu E_{\text{inference}}
+\]
+
+where:
+
+- D_model = model quality degradation.
+- R_storage = actual storage bitrate.
+- M_peak = peak active memory.
+- T_token = inference latency.
+- E_inference = measured or modeled energy.
+
+Subject to:
+
+\[
+M_{\text{peak}}\leq M_{\text{budget}}
+\]
+
+\[
+R_{\text{storage}}\leq R_{\text{budget}}
+\]
+
+\[
+T_{\text{token}}\leq T_{\text{budget}}
+\]
+
+\[
+D_{\text{model}}\leq D_{\text{maximum}}
+\]
+
+Provide configurable optimization profiles:
+
+- Minimum storage.
+- Minimum RAM.
+- Maximum generation speed.
+- Minimum energy.
+- Balanced deployment.
+- Maximum model quality.
+
+Use Pareto-front analysis instead of pretending that a single configuration is optimal for every objective.
+
+## 18. Automated Experiment Engine
+
+Implement a research experiment manager.
+
+For each experiment:
+
+1. Record model identity and checkpoint hash.
+2. Record calibration dataset and version.
+3. Record hardware specifications.
+4. Record algorithm parameters.
+5. Generate quantized model.
+6. Measure actual file size.
+7. Run reconstruction tests.
+8. Run model-quality tests.
+9. Run memory benchmarks.
+10. Run performance benchmarks.
+11. Generate comparison reports.
+
+Save machine-readable results.
+
+Support reproducible seeds and configuration files.
+
+Every experiment must be independently repeatable.
+
+---
+
+# PART VI — SOFTWARE ARCHITECTURE
+
+## 19. Repository
+
+Implement:
+
+```text
+POLAR-FLASH/
+│
+├── polarflash-core/
+│   ├── contracts/
+│   ├── formats/
+│   ├── hardware/
+│   └── memory/
+│
+├── polarflash-quant/
+│   ├── information_theory/
+│   ├── transforms/
+│   ├── lattice/
+│   ├── polar/
+│   ├── residual/
+│   └── calibration/
+│
+├── polarflash-rt/
+│   ├── cpu/
+│   ├── cuda/
+│   ├── streaming/
+│   ├── sparse/
+│   └── kv_cache/
+│
+├── polarflash-train/
+│   ├── qat/
+│   ├── lora/
+│   ├── pv_tuning/
+│   └── gradcodes/
+│
+├── polarflash-mobile/
+│   ├── arm64/
+│   └── android/
+│
+├── polarflash-bench/
+│   ├── rate_distortion/
+│   ├── perplexity/
+│   ├── memory/
+│   ├── bandwidth/
+│   ├── energy/
+│   └── latency/
+│
+├── tests/
+├── experiments/
+├── benchmarks/
+├── examples/
+├── docs/
+├── CMakeLists.txt
+└── pyproject.toml
+```
+
+## 20. Technology requirements
+
+- Python 3.12.
+- C++20.
+- PyTorch.
+- NumPy.
+- SciPy.
+- Safetensors.
+- CMake.
+- CUDA where supported.
+- Triton where supported.
+- Native Windows I/O.
+- Linux asynchronous I/O.
+- Optional ARM64/Android backend.
+
+Avoid mandatory Docker, WSL, proprietary hosted APIs and paid services.
+
+The CPU backend must remain usable without CUDA.
+
+## 21. `.pflash` format
+
+Implement:
+
+- Magic bytes.
+- Format version.
+- Architecture metadata.
+- Tensor directory.
+- Tensor offsets.
+- Shapes and data types.
+- Quantization metadata.
+- Codebook information.
+- Residual information.
+- Checksums.
+- Alignment metadata.
+- Random-access support.
+
+Calculate effective bitrate from actual serialized bytes.
+
+Support memory mapping and safe parsing.
+
+## 22. CLI
+
+Implement:
+
+```bash
+polarflash inspect model/
+```
+
+```bash
+polarflash quantize model/ --backend int4
+```
+
+```bash
+polarflash quantize model/ --backend e8
+```
+
+```bash
+polarflash quantize model/ --backend polar
+```
+
+```bash
+polarflash analyze-rate-distortion model/
+```
+
+```bash
+polarflash benchmark model.pflash
+```
+
+```bash
+polarflash inspect-memory model.pflash
+```
+
+```bash
+polarflash run model.pflash --device auto
+```
+
+```bash
+polarflash finetune model.pflash --method pv-gradcode
+```
+
+```bash
+polarflash benchmark-physics model.pflash
+```
+
+# PART VII — SCIENTIFIC BENCHMARKING
+
+## 23. Required comparisons
+
+Compare against:
+
+- FP16.
+- BF16.
+- GGUF Q4_K_M.
+- GGUF Q3_K_M.
+- GGUF Q2_K.
+- GPTQ.
+- AWQ.
+- EXL2.
+- E8 lattice quantization.
+- Compatible BitNet models.
+
+Distinguish post-training compression of existing models from models pretrained using ternary architectures.
+
+## 24. Evaluation
+
+### Information theory
+
+- Effective bpw.
+- Empirical entropy.
+- Rate-distortion curves.
+- Layer sensitivity.
+- Metadata overhead.
+
+### Numerical analysis
+
+- MSE.
+- Normalized MSE.
+- Maximum absolute error.
+- Cosine similarity.
+- Logit divergence.
+- Residual estimation variance.
+
+### Model quality
+
+- WikiText-2 perplexity.
+- C4 perplexity.
+- MMLU.
+- ARC.
+- HellaSwag.
+- GSM8K.
+- Long-context retrieval.
+
+### Physical systems
+
+- Peak RAM.
+- Peak VRAM.
+- Storage bandwidth.
+- DRAM bandwidth.
+- Read amplification.
+- Page utilization.
+- Cache hit rate.
+- Time to first token.
+- Generation tokens/second.
+- Energy per generated token where measurable.
+
+### Training
+
+- Optimizer memory.
+- Gradient memory.
+- Training throughput.
+- Validation loss.
+- Discrete update acceptance rate.
+- Final model quality.
+
+# PART VIII — HARDWARE TARGET
+
+## 25. Development target
+
+Primary development system:
+
+- Windows 11.
+- NVIDIA RTX 5060 Laptop GPU.
+- 16 GB system RAM.
+- 512 GB SSD.
+- Native Windows execution.
+
+Optimize development for this hardware.
+
+Do not assume sufficient memory to train or load 70B models.
+
+Start experiments with 1B–3B models.
+
+The system must provide:
+
+- Automatic memory budgeting.
+- CPU fallback.
+- CUDA acceleration.
+- Storage streaming.
+- Low-memory model loading.
+- Explicit precision reporting.
+
+# PART IX — DEVELOPMENT MILESTONES
+
+## Milestone 0: Mathematical validation
+
+Implement executable tests for:
+
+- Rate-distortion.
+- Hadamard orthogonality.
+- Gaussian concentration.
+- Polar reconstruction.
+- E8 reconstruction.
+- QJL estimator unbiasedness.
+- QJL variance.
+- Fisher ranking.
+- Memory accounting.
+- Flash-page utilization.
+- Roofline analysis.
+
+## Milestone 1: Working baseline
+
+- Safetensors ingestion.
+- INT4 compression.
+- `.pflash` serialization.
+- CPU inference.
+- Memory-mapped loading.
+
+## Milestone 2: Advanced quantization
+
+- Hadamard.
+- E8.
+- Residual coding.
+- Rate-distortion optimization.
+
+## Milestone 3: Polar research
+
+- Recursive PolarQuant.
+- Learned codebooks.
+- Trellis coding.
+- Angular precision allocation.
+
+## Milestone 4: Physical runtime
+
+- Streaming.
+- Double buffering.
+- Page-aware layouts.
+- CPU/CUDA kernels.
+- Contextual sparsity.
+
+## Milestone 5: KV-cache
+
+- INT8.
+- 2-bit cache.
+- Sliding windows.
+- Dictionary-subspace research.
+
+## Milestone 6: Training
+
+- LoRA.
+- QAT.
+- PV-Tuning.
+- GradCodes.
+
+## Milestone 7: Cross-platform
+
+- Windows.
+- Linux.
+- ARM64.
+- Android.
+
+## Milestone 8: Final scientific validation
+
+- Full benchmark suite.
+- Pareto-front comparisons.
+- Reproducibility.
+- Security testing.
+- Documentation.
+- Release packaging.
+
+# PART X — MANDATORY ACCEPTANCE CRITERIA
+
+The first stable release must provide:
+
+1. Existing-model ingestion.
+2. Working INT4 compression.
+3. Valid `.pflash` serialization.
+4. Numerical reconstruction tests.
+5. Working CPU inference.
+6. Working CUDA inference where supported.
+7. Memory-mapped model loading.
+8. Accurate peak-memory reporting.
+9. Reproducible benchmark results.
+10. LoRA or QAT fine-tuning.
+11. Documented hardware compatibility.
+12. Reproducible installation.
+
+Advanced research acceptance requires separate proof:
+
+- E8 quantization must demonstrate its effective bitrate and quality.
+- PolarQuant must outperform a suitable baseline at equivalent actual storage rates.
+- QJL must demonstrate the predicted estimator behavior.
+- Sparse routing must produce measured end-to-end speedup.
+- Flash streaming must improve actual memory feasibility without unacceptable latency.
+- PV-GradCode must demonstrate optimization stability and quality retention.
+- The 1.75 bpw target must include all metadata, codebooks, indices and residuals.
+
+Never classify a research prototype as production-ready.
+
+# FINAL RESEARCH DIRECTIVE
+
+POLAR-FLASH must treat model compression as a joint problem involving information theory, high-dimensional geometry, numerical optimization, computer architecture, memory bandwidth and physical energy consumption.
+
+The ultimate optimization target is:
+
+\[
+\boxed{
+\min
+\left(
+\text{Information}
++
+\text{Memory}
++
+\text{Data Movement}
++
+\text{Compute Energy}
++
+\text{Latency}
+\right)
+}
+\]
+
+subject to preserving the model's functional capability.
+
+The framework must discover the best achievable trade-offs experimentally.
+
+Do not optimize one metric in isolation.
+
+Do not claim a mathematical breakthrough without proof or empirical evidence.
+
+**Build the mathematics. Implement the physics. Measure the hardware. Validate the intelligence.**
+
+The final product must be a real, reproducible, open-source engineering framework—not a theoretical compression proposal.
+
+
+
+now understand this prompt extract the mathematics and physics of working and improve the current model training 
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-11-07T22:57:38+05:30.
+</ADDITIONAL_METADATA>

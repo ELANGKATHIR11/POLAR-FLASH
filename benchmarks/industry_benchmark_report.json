@@ -1,0 +1,302 @@
+{
+  "Base_Qwen3.5-4B": {
+    "overall_score_percent": 31.67,
+    "gen_ai_reasoning_percent": 43.33,
+    "ocr_document_extraction_percent": 16.67,
+    "coding_functional_pass_rate_percent": 0.0,
+    "coding_ast_syntax_validity_percent": 100.0,
+    "image_diagram_analysis_percent": 66.67,
+    "throughput_tokens_per_sec": 61.37,
+    "total_benchmark_time_sec": 78.22,
+    "details": {
+      "gen_ai": {
+        "scores": [
+          1.0,
+          0.0,
+          0.3
+        ],
+        "latencies": [
+          11.930852890014648,
+          6.09991455078125,
+          6.061258792877197
+        ],
+        "details": [
+          {
+            "task": "Multi-Step Logic Deduction",
+            "score": 1.0,
+            "elapsed": 11.93,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   Input: A logic puzzle about five engineers (A, B, C, D, E) and f"
+          },
+          {
+            "task": "Strict Negative Constraints Instruction Following",
+            "score": 0.0,
+            "elapsed": 6.1,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   Task: Explain what an API is.     *   Constraint 1: Exactly two "
+          },
+          {
+            "task": "Chain-of-Thought Mathematical Probability",
+            "score": 0.3,
+            "elapsed": 6.06,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   System Identity: Zenthi-AI OS (Advanced local-first Agentic AI O"
+          }
+        ]
+      },
+      "ocr": {
+        "scores": [
+          0.0,
+          0.0,
+          0.5
+        ],
+        "latencies": [
+          6.223692178726196,
+          5.977033376693726,
+          5.812222719192505
+        ],
+        "details": [
+          {
+            "task": "Noisy Receipt Text -> Strict Valid JSON Schema",
+            "score": 0.0,
+            "elapsed": 6.22,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   Input: A raw receipt text.     *   Task: Extract specific fields"
+          },
+          {
+            "task": "Industrial Nameplate Key-Value Extraction",
+            "score": 0.0,
+            "elapsed": 5.98,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   Input: A text snippet resembling an OCR scan of a Siemens S7-150"
+          },
+          {
+            "task": "Unstructured Table OCR -> Markdown Grid",
+            "score": 0.5,
+            "elapsed": 5.81,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   Input: A noisy space-delimited OCR report (text data).     *   T"
+          }
+        ]
+      },
+      "coding": {
+        "ast_scores": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "exec_scores": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "latencies": [
+          6.005388259887695,
+          6.036120653152466,
+          5.958667993545532
+        ],
+        "details": [
+          {
+            "task": "Algorithm: Longest Substring Without Repeating Chars",
+            "ast_valid": 1.0,
+            "unit_test_pass_rate": 0.0,
+            "detail": "RuntimeError: name 'length_of_longest_substring' is not defined",
+            "elapsed": 6.01
+          },
+          {
+            "task": "Algorithm: Merge Overlapping Intervals",
+            "ast_valid": 1.0,
+            "unit_test_pass_rate": 0.0,
+            "detail": "RuntimeError: name 'merge_intervals' is not defined",
+            "elapsed": 6.04
+          },
+          {
+            "task": "Algorithm: Deep Recursive Dictionary Merger",
+            "ast_valid": 1.0,
+            "unit_test_pass_rate": 0.0,
+            "detail": "RuntimeError: name 'deep_merge' is not defined",
+            "elapsed": 5.96
+          }
+        ]
+      },
+      "image_diagram": {
+        "scores": [
+          1.0,
+          0.5,
+          0.5
+        ],
+        "latencies": [
+          5.991737604141235,
+          6.0076305866241455,
+          6.1133131980896
+        ],
+        "details": [
+          {
+            "task": "Mermaid Architecture Diagram SPOF Analysis",
+            "score": 1.0,
+            "elapsed": 5.99,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   **Role:** Zenthi-AI OS (Advanced local-first Agentic AI Operatin"
+          },
+          {
+            "task": "OCR Document Spatial Layout & Bounding Box Reasoning",
+            "score": 0.5,
+            "elapsed": 6.01,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   Input: OCR bounding boxes (normalized [x_min, y_min, x_max, y_ma"
+          },
+          {
+            "task": "Telemetry Performance & Outage Root Cause Diagnosis",
+            "score": 0.5,
+            "elapsed": 6.11,
+            "snippet": "Thinking Process:  1.  **Analyze the Request:**     *   **Role:** Zenthi-AI OS (Advanced local-first Agentic AI Operatin"
+          }
+        ]
+      },
+      "total_tokens": 4800,
+      "total_time": 78.2178328037262
+    }
+  },
+  "Zenith-4B (Fine-Tuned)": {
+    "overall_score_percent": 80.28,
+    "gen_ai_reasoning_percent": 43.33,
+    "ocr_document_extraction_percent": 77.78,
+    "coding_functional_pass_rate_percent": 100.0,
+    "coding_ast_syntax_validity_percent": 100.0,
+    "image_diagram_analysis_percent": 100.0,
+    "throughput_tokens_per_sec": 84.08,
+    "total_benchmark_time_sec": 24.76,
+    "details": {
+      "gen_ai": {
+        "scores": [
+          1.0,
+          0.0,
+          0.3
+        ],
+        "latencies": [
+          3.6340930461883545,
+          0.6268441677093506,
+          3.111088752746582
+        ],
+        "details": [
+          {
+            "task": "Multi-Step Logic Deduction",
+            "score": 1.0,
+            "elapsed": 3.63,
+            "snippet": "A works in Frontend. This is because A cannot be in ML, Security (since D is already there), or Backend (since C is ther"
+          },
+          {
+            "task": "Strict Negative Constraints Instruction Following",
+            "score": 0.0,
+            "elapsed": 0.63,
+            "snippet": "An API is a set of rules that allow different software applications to communicate with each other. It acts as a bridge "
+          },
+          {
+            "task": "Chain-of-Thought Mathematical Probability",
+            "score": 0.3,
+            "elapsed": 3.11,
+            "snippet": "To find the overall probability that a request enters the cluster encounters a failure, we need to calculate the probabi"
+          }
+        ]
+      },
+      "ocr": {
+        "scores": [
+          1.0,
+          0.3333333333333333,
+          1.0
+        ],
+        "latencies": [
+          1.5164475440979004,
+          1.4011859893798828,
+          1.5332987308502197
+        ],
+        "details": [
+          {
+            "task": "Noisy Receipt Text -> Strict Valid JSON Schema",
+            "score": 1.0,
+            "elapsed": 1.52,
+            "snippet": "```json {   \"merchant\": \"SUPERMARKET MART #402\",   \"date\": \"2026-05-12\",   \"items\": [     {\"name\": \"ORG MILK 1GAL\", \"pri"
+          },
+          {
+            "task": "Industrial Nameplate Key-Value Extraction",
+            "score": 0.3333333333333333,
+            "elapsed": 1.4,
+            "snippet": "{     \"manufacturer\": \"SIEMENS AG - INDUSTRY AUTOMATION\",     \"type\": \"SIMATIC S7-1500 CPU 1516-3 PN/DP\",     \"firmware_"
+          },
+          {
+            "task": "Unstructured Table OCR -> Markdown Grid",
+            "score": 1.0,
+            "elapsed": 1.53,
+            "snippet": "| Quarter | Revenue_Billion | Net_Income_Million | Margin_Pct | | --- | --- | --- | --- | | Q1-2025 | 14.2 | 1850 | 13.0"
+          }
+        ]
+      },
+      "coding": {
+        "ast_scores": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "exec_scores": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "latencies": [
+          1.2236442565917969,
+          1.5812561511993408,
+          1.381291389465332
+        ],
+        "details": [
+          {
+            "task": "Algorithm: Longest Substring Without Repeating Chars",
+            "ast_valid": 1.0,
+            "unit_test_pass_rate": 1.0,
+            "detail": "Passed 4/4 tests",
+            "elapsed": 1.22
+          },
+          {
+            "task": "Algorithm: Merge Overlapping Intervals",
+            "ast_valid": 1.0,
+            "unit_test_pass_rate": 1.0,
+            "detail": "Passed 4/4 tests",
+            "elapsed": 1.58
+          },
+          {
+            "task": "Algorithm: Deep Recursive Dictionary Merger",
+            "ast_valid": 1.0,
+            "unit_test_pass_rate": 1.0,
+            "detail": "Passed 2/2 tests",
+            "elapsed": 1.38
+          }
+        ]
+      },
+      "image_diagram": {
+        "scores": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "latencies": [
+          3.4801082611083984,
+          1.2696352005004883,
+          4.003948450088501
+        ],
+        "details": [
+          {
+            "task": "Mermaid Architecture Diagram SPOF Analysis",
+            "score": 1.0,
+            "elapsed": 3.48,
+            "snippet": "### Analysis of the Mermaid Architecture Diagram  #### 1. Primary Data Flow Ingress and Egress - **Ingress**: The primar"
+          },
+          {
+            "task": "OCR Document Spatial Layout & Bounding Box Reasoning",
+            "score": 1.0,
+            "elapsed": 1.27,
+            "snippet": "1. The document header is represented by Box A: [50, 40, 950, 120] -> \"GLOBAL HEALTHCARE INVOICE #9812\". 2. Box B and Bo"
+          },
+          {
+            "task": "Telemetry Performance & Outage Root Cause Diagnosis",
+            "score": 1.0,
+            "elapsed": 4.0,
+            "snippet": "### Diagnosis:  #### 1. Root Cause Bottleneck: The primary root cause of the cascade failure appears to be a **database "
+          }
+        ]
+      },
+      "total_tokens": 2082,
+      "total_time": 24.762841939926147
+    }
+  }
+}

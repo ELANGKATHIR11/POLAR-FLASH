@@ -1,0 +1,23 @@
+base: Qwen/Qwen2.5-Coder-3B-Instruct
+task: sft
+modality: text
+
+data:
+  train: ./datasets/zenthi_hybrid_train.jsonl
+  val: ./datasets/zenthi_hybrid_eval.jsonl
+  format: auto
+  max_length: 2048
+
+training:
+  epochs: 2
+  lr: 2e-4
+  batch_size: auto
+  stream_layers: true        # Enable 4GB low-spec layer streaming
+  checkpoint_every: 100      # Checkpoint every 100 steps
+  lora:
+    r: 16
+    alpha: 32
+    target_modules: auto
+  quantization: 4bit
+
+output: ./models/adapter-code

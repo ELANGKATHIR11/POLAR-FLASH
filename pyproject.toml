@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polarflash"
+version = "1.0.0"
+description = "POLAR-FLASH: Public Framework to Quantize and Fine-Tune Any Open-Source LLM into High-Performance SLMs on Lower-Spec Hardware"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Kathir", email = "elangkathir11@gmail.com" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Hardware",
+    "License :: OSI Approved :: Apache Software License"
+]
+dependencies = [
+    "torch>=2.2.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "safetensors>=0.4.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/ELANGKATHIR11/POLAR-FLASH"
+Repository = "https://github.com/ELANGKATHIR11/POLAR-FLASH"
+Issues = "https://github.com/ELANGKATHIR11/POLAR-FLASH/issues"
+
+[project.scripts]
+polarflash = "polarflash_core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["polarflash*"]

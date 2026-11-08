@@ -1,0 +1,23 @@
+# POLAR-FLASH Recipe: 4-Bit Edge LLM -> SLM Compression
+# Optimizes any Hugging Face LLM (e.g., Llama-3, Qwen-2.5, Mistral) for sub-4GB consumer GPUs.
+
+recipe_name: "llm-to-slm-4bit-edge"
+version: "1.0.0"
+
+quantization:
+  method: "polar_coordinate"
+  target_bpw: 1.75
+  weight_format: "W4A16"
+  kv_cache:
+    format: "non_uniform_2bit"
+    bits: 2
+    max_mse: 0.35
+    memory_reduction: "4x"
+  hadamard_rotation: true
+  e8_lattice: true
+
+hardware:
+  target_device: "consumer_gpu"
+  max_vram_gb: 3.5
+  duty_cycle_sleep_ms: 10
+  thermal_limit_celsius: 75

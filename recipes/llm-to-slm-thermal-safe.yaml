@@ -1,0 +1,17 @@
+# POLAR-FLASH Recipe: Laptop & Low-Spec Device Thermal Safeguard
+# Prevents thermal throttling, system resets, and power-limit drops on mobile GPUs.
+
+recipe_name: "llm-to-slm-thermal-safe"
+version: "1.0.0"
+
+thermal_throttling:
+  enabled: true
+  temperature_poll_interval_s: 1.0
+  warning_threshold_celsius: 72
+  critical_threshold_celsius: 80
+  duty_cycle_cooling_ms: 25  # Sleep per inference step when hot
+
+memory_budget:
+  max_system_vram_ratio: 0.70  # Leave >= 30% VRAM free for browser/OS
+  eviction_policy: "heavy_hitter_h2o"
+  kv_compression_ratio: 4.0
