@@ -5,6 +5,7 @@ Implements Part II Section 6 of the POLAR-FLASH Mathematical Specification:
 2. Layer sensitivity ranking: alpha_l = mean(F_{l, i}) for rate-distortion allocation and DARE merging.
 3. Sparse ternary residual decomposition: r_i in {-s, 0, +s} with configurable sparsity (1%, 3%, 5%, 10%).
 4. Optimal ternary residual scale derivation: s* = sum_{i in S} |e_i| / |S|.
+5. Comparative sparsity analysis (1%, 3%, 5%, 10%) with exact index, sign, and scale overhead accounting.
 """
 
 import math
@@ -35,7 +36,6 @@ class FisherSensitivityEstimator:
         model.eval()
         fisher_accum: Dict[str, torch.Tensor] = {}
 
-        # Initialize accumulators
         for name, param in model.named_parameters():
             if param.requires_grad:
                 fisher_accum[name] = torch.zeros_like(param.data, device=device)
@@ -46,7 +46,6 @@ class FisherSensitivityEstimator:
                 break
             model.zero_grad()
 
-            # Forward pass
             if isinstance(batch, dict):
                 input_ids = batch["input_ids"].to(device)
                 labels = batch.get("labels", input_ids).to(device)
@@ -57,7 +56,6 @@ class FisherSensitivityEstimator:
                 outputs = model(inputs)
                 loss = nn.functional.cross_entropy(outputs, targets)
 
-            # Backward pass to gather gradient sample
             loss.backward()
 
             for name, param in model.named_parameters():
@@ -66,7 +64,6 @@ class FisherSensitivityEstimator:
 
             batch_count += 1
 
-        # Normalize by batch count
         for name in fisher_accum:
             fisher_accum[name] /= max(batch_count, 1)
 
@@ -92,9 +89,6 @@ class SparseTernaryResidual:
     Sparsity budget: k / N coordinates are non-zero (typically 1%, 3%, 5%, 10%).
     """
     def __init__(self, sparsity_fraction: float = 0.05):
-        """
-        sparsity_fraction: Fraction of coordinates to allocate non-zero ternary values.
-        """
         self.sparsity_fraction = max(0.001, min(0.5, sparsity_fraction))
 
     def decompose(
@@ -120,7 +114,6 @@ class SparseTernaryResidual:
         else:
             score = torch.abs(flat_e)
 
-        # Find top-k coordinates
         topk_scores, topk_indices = torch.topk(score, k=k, sorted=False)
         selected_errors = flat_e[topk_indices]
 
@@ -129,7 +122,7 @@ class SparseTernaryResidual:
 
         # Ternary assignments in {-s, +s}
         ternary_signs = torch.sign(selected_errors)
-        ternary_signs[ternary_signs == 0] = 1.0  # Default non-zero direction
+        ternary_signs[ternary_signs == 0] = 1.0
         ternary_values = ternary_signs * scale
 
         # Construct sparse tensor
@@ -137,13 +130,13 @@ class SparseTernaryResidual:
         r_sparse[topk_indices] = ternary_values
         r_sparse = r_sparse.reshape(orig_shape)
 
-        # Effective residual error after ternary correction
         remaining_e = error_residual - r_sparse
         mse_before = float(torch.mean(error_residual ** 2).item())
         mse_after = float(torch.mean(remaining_e ** 2).item())
         error_reduction_pct = (1.0 - (mse_after / max(mse_before, 1e-15))) * 100.0
 
-        # Storage metadata (accounting for sparse index overhead: 16-bit indices + 1-bit signs)
+        # Exact storage overhead accounting:
+        # index bits: ceil(log2(n)) per non-zero + 1 bit sign per non-zero + 32-bit float scale
         index_bits_per_nonzero = math.ceil(math.log2(max(n, 2)))
         sign_bits_per_nonzero = 1
         scale_bits = 32
@@ -158,7 +151,35 @@ class SparseTernaryResidual:
             "mse_before_residual": mse_before,
             "mse_after_residual": mse_after,
             "error_reduction_percentage": error_reduction_pct,
-            "effective_residual_bpw": effective_residual_bpw
+            "effective_residual_bpw": effective_residual_bpw,
+            "topk_indices": topk_indices,
+            "ternary_signs": ternary_signs
         }
 
         return r_sparse, metadata
+
+
+def compare_sparsity_levels(
+    error_residual: torch.Tensor,
+    fisher_weights: Optional[torch.Tensor] = None,
+    sparsity_levels: List[float] = [0.01, 0.03, 0.05, 0.10]
+) -> Dict[str, Any]:
+    """
+    Evaluates and compares ternary residual correction across 1%, 3%, 5%, and 10% sparsity.
+    Computes exact trade-off: error reduction percentage vs. bits-per-weight storage overhead.
+    """
+    results = {}
+    for sp in sparsity_levels:
+        decomposer = SparseTernaryResidual(sparsity_fraction=sp)
+        _, meta = decomposer.decompose(error_residual, fisher_weights=fisher_weights)
+        label = f"{int(sp * 100)}%"
+        results[label] = {
+            "sparsity_fraction": sp,
+            "nonzero_count": meta["nonzero_coords"],
+            "optimal_scale": meta["optimal_scale"],
+            "mse_before": meta["mse_before_residual"],
+            "mse_after": meta["mse_after_residual"],
+            "error_reduction_percentage": meta["error_reduction_percentage"],
+            "effective_residual_bpw": meta["effective_residual_bpw"]
+        }
+    return results

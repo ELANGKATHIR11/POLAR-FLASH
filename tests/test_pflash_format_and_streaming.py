@@ -18,8 +18,8 @@ from polarflash_core.formats.pflash_format import PFlashWriter, PFlashReader
 from polarflash_rt.streaming.flash_streamer import DoubleBufferPipeline
 
 
-def test_pflash_serialization_and_mmap():
-    test_filepath = "f:/Zenith-AI/tests/scratch_test_model.pflash"
+def test_pflash_serialization_and_mmap(tmp_path):
+    test_filepath = str(tmp_path / "scratch_test_model.pflash")
     writer = PFlashWriter(page_alignment=4096)
     writer.set_metadata({
         "model_architecture": "qwen2.5-coder-3b-polarflash",

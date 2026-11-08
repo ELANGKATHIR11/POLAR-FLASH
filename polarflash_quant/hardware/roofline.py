@@ -3,12 +3,13 @@ POLAR-FLASH: Hardware Roofline, Physical Memory & Energy Modeling Engine
 Implements Part III Sections 8 & 9 of the POLAR-FLASH Specification:
 1. Operational Intensity (OI) = FLOPs / Bytes transferred.
 2. Roofline performance bounds: P_attainable <= min(P_peak, BW_memory * OI).
-3. Physical peak memory budgeting & feasibility gating for 4GB low-spec and 8GB dev profiles.
+3. Physical peak memory budgeting & feasibility gating for 4GB low-spec and 8GB dev profiles:
+   M_peak = M_weights + M_activations + M_KV + M_workspace + M_buffers + M_runtime
 4. Energy consumption model: E_total = N_op * E_op + sum(B_j * eps_j) + N_IO * E_IO.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 
 @dataclass
@@ -89,10 +90,43 @@ class RooflineAnalyzer:
         return res
 
 
+def compute_energy_consumption(
+    num_flops: float,
+    bytes_transferred_vram: float,
+    bytes_transferred_dram: float = 0.0,
+    bytes_transferred_ssd: float = 0.0,
+    energy_per_flop_pj: float = 1.0,         # 1 picoJoule per FP16 FLOP
+    energy_per_vram_byte_pj: float = 5.0,    # 5 picoJoules per byte from GDDR/HBM
+    energy_per_dram_byte_pj: float = 20.0,   # 20 picoJoules per byte from Host DDR5
+    energy_per_ssd_byte_pj: float = 100.0    # 100 picoJoules per byte from PCIe NVMe
+) -> Dict[str, Any]:
+    """
+    Computes total energy in Joules using physical hardware energy coefficients:
+    E_total = N_op * E_op + sum(B_j * eps_j) + N_IO * E_IO
+    """
+    e_compute_joules = (num_flops * energy_per_flop_pj) * 1e-12
+    e_vram_joules = (bytes_transferred_vram * energy_per_vram_byte_pj) * 1e-12
+    e_dram_joules = (bytes_transferred_dram * energy_per_dram_byte_pj) * 1e-12
+    e_ssd_joules = (bytes_transferred_ssd * energy_per_ssd_byte_pj) * 1e-12
+
+    total_joules = e_compute_joules + e_vram_joules + e_dram_joules + e_ssd_joules
+
+    return {
+        "compute_energy_joules": e_compute_joules,
+        "vram_memory_energy_joules": e_vram_joules,
+        "dram_memory_energy_joules": e_dram_joules,
+        "ssd_io_energy_joules": e_ssd_joules,
+        "total_energy_joules": total_joules,
+        "compute_energy_percentage": (e_compute_joules / max(total_joules, 1e-15)) * 100.0,
+        "memory_energy_percentage": ((e_vram_joules + e_dram_joules + e_ssd_joules) / max(total_joules, 1e-15)) * 100.0
+    }
+
+
 class MemoryFeasibilityGate:
     """
     Guarantees physical memory safety by calculating peak runtime footprint
-    and rejecting unfeasible context or quantization tiers before allocation.
+    and rejecting unfeasible context or quantization tiers before allocation:
+    M_peak = M_weights + M_activations + M_KV + M_workspace + M_buffers + M_runtime
     """
     def __init__(self, hardware: HardwareProfile = LOW_SPEC_4GB_DEVICE):
         self.hw = hardware
@@ -109,7 +143,7 @@ class MemoryFeasibilityGate:
         kv_quant_bytes: float = 1.0,        # 1.0 for Q8 KV cache, 2.0 for FP16
         activation_workspace_mb: float = 350.0
     ) -> Dict[str, Any]:
-        # 1. Model Weights Footprint
+        # 1. Model Weights Footprint: Nb/8
         weight_gb = (num_params_billions * 1e9 * (effective_bpw / 8.0)) / (1024 ** 3)
         projector_gb = vision_projector_mb / 1024.0
 

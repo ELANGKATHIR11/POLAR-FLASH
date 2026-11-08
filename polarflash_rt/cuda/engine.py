@@ -1,9 +1,10 @@
 """
 POLAR-FLASH: CUDA Accelerated GPU Runtime Engine
 Implements Part III & VI of the POLAR-FLASH Specification:
-1. Pinned-memory streaming and asynchronous host-to-device transfers.
+1. Pinned-memory streaming and asynchronous host-to-device transfers via CUDA streams.
 2. Tensor-Core accelerated FP16/BF16 matrix multiplication.
 3. GPU memory management avoiding VRAM fragmentation.
+4. Automatic fallback when CUDA is not present.
 """
 
 import os
@@ -26,6 +27,7 @@ class PFlashCUDAEngine:
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.reader = PFlashReader(pflash_path)
         self.layers: Dict[str, PolarLinearLayer] = {}
+        self.stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
         self._build_layers()
 
     def _build_layers(self):
@@ -50,7 +52,13 @@ class PFlashCUDAEngine:
             raise KeyError(f"Layer '{layer_name}' not found.")
         layer = self.layers[layer_name]
         x_dev = x.to(self.device)
-        return layer(x_dev)
+        if self.stream is not None:
+            with torch.cuda.stream(self.stream):
+                out = layer(x_dev)
+            self.stream.synchronize()
+            return out
+        else:
+            return layer(x_dev)
 
     def benchmark_gpu_throughput(
         self,
@@ -88,7 +96,7 @@ class PFlashCUDAEngine:
 
         vram_used_mb = 0.0
         if self.device.type == "cuda":
-            vram_used_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+            vram_used_mb = torch.cuda.memory_allocated(device=self.device) / (1024 ** 2)
 
         return {
             "device": str(self.device),
@@ -107,4 +115,3 @@ class PFlashCUDAEngine:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-

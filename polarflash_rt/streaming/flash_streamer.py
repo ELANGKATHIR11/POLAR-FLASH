@@ -4,12 +4,14 @@ Implements Part III Sections 10 & 11 of the POLAR-FLASH Specification:
 1. Flash-Page Coalescing: N_pages = ceil(((o mod P) + L) / P).
 2. Storage Utilization U = Useful / Transferred, Read Amplification A = Transferred / Useful.
 3. Asynchronous Double-Buffering Pipeline: T_pipeline ~ max(T_compute, T_IO).
-4. Buffer prefetch scheduler with queue depth, cache hit/miss tracking, and I/O stall estimation.
+4. Real-time background prefetching queue with double-buffering.
 """
 
 import math
 import time
-from typing import Dict, List, Any, Tuple, Optional
+import threading
+import queue
+from typing import Dict, List, Any, Tuple, Optional, Callable
 
 
 class FlashPageCoalescer:
@@ -124,3 +126,39 @@ class DoubleBufferPipeline:
             "io_stall_percentage": (io_stall / max(pipelined_elapsed, 1e-12)) * 100.0
         }
         return self.stats
+
+
+class AsyncDoubleBufferQueue:
+    """
+    Live asynchronous double-buffering worker that prefetches layers in background
+    threads to overlap SSD reads with PyTorch computation.
+    """
+    def __init__(self, fetch_fn: Callable[[str], Any], max_queue_depth: int = 2):
+        self.fetch_fn = fetch_fn
+        self.max_queue_depth = max_queue_depth
+        self.queue: queue.Queue = queue.Queue(maxsize=max_queue_depth)
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start_prefetch(self, layer_names: List[str]):
+        """Starts background worker to sequentially load layers into the queue."""
+        def _worker():
+            for name in layer_names:
+                if self._stop_event.is_set():
+                    break
+                data = self.fetch_fn(name)
+                self.queue.put((name, data))
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=_worker, daemon=True)
+        self._thread.start()
+
+    def get_next(self, timeout: float = 10.0) -> Tuple[str, Any]:
+        """Retrieves prefetched layer from queue, stalling only if I/O is slower than compute."""
+        return self.queue.get(timeout=timeout)
+
+    def stop(self):
+        """Stops background prefetching thread."""
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)

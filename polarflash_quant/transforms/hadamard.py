@@ -1,15 +1,18 @@
 """
 POLAR-FLASH: Orthogonal Fast Walsh-Hadamard Transform & Gaussian Concentration Engine
-Implements Part II Section 2 of the POLAR-FLASH Mathematical Specification:
-1. Fast Walsh-Hadamard Transform (FWHT) with O(d log d) complexity.
-2. Randomized sign diagonal preprocessing (D_ii in {-1, +1}) for incoherence.
-3. Energy preservation: ||H w||_2^2 = ||w||_2^2.
-4. Kurtosis, skewness, and radial chi-squared concentration diagnostics.
+Implements Part II Sections 2 & 3 of the POLAR-FLASH Mathematical Specification:
+1. Fast Walsh-Hadamard Transform (FWHT) with O(d log2 d) complexity.
+2. Randomized sign diagonal preprocessing (D_ii in {-1, +1}) for incoherent rotation.
+3. Block-wise execution (BlockHadamardTransform) for arbitrary matrix dimensions (e.g. non-power-of-2 SwiGLU layers).
+4. Strict energy preservation: ||H w||_2^2 = ||w||_2^2 and invertibility w = H^T z.
+5. Gaussian concentration analysis on thin spherical shells: E[||z||^2] = d*sigma^2, Var(||z||^2) = 2*d*sigma^4, R ~ sigma*sqrt(d).
+6. Kurtosis, outlier suppression, and distribution diagnostics.
 """
 
 import math
 import torch
-from typing import Dict, Any, Tuple
+import numpy as np
+from typing import Dict, Any, Tuple, Optional
 
 
 def fast_walsh_hadamard_transform(x: torch.Tensor, normalize: bool = True) -> torch.Tensor:
@@ -49,10 +52,11 @@ class RandomizedHadamardTransform:
     z = H * D * w
     where D is a diagonal matrix of uniform random signs in {-1, +1}, and H is normalized FWHT.
     Preserves exact Euclidean norm ||z||_2 = ||w||_2 while dispersing outlier coordinate spikes.
+    Supports CPU and CUDA execution.
     """
     def __init__(self, dim: int, seed: int = 42, device: str = "cpu"):
         if (dim & (dim - 1)) != 0:
-            raise ValueError(f"Dimension must be a power of 2, got {dim}")
+            raise ValueError(f"Dimension must be a power of 2, got {dim}. Use BlockHadamardTransform for arbitrary dimensions.")
         self.dim = dim
         self.device = device
 
@@ -69,6 +73,154 @@ class RandomizedHadamardTransform:
         """Inverse rotation: x = (H * z) * signs (since H^T = H and D^-1 = D)"""
         h_inv = fast_walsh_hadamard_transform(z, normalize=True)
         return h_inv * self.signs.to(z.device)
+
+
+class BlockHadamardTransform:
+    """
+    Block-wise Randomized Hadamard Transform supporting arbitrary matrix dimensions.
+    Partitions the last dimension into subvectors of size block_size (power of 2, default 256 or 512).
+    Remaining elements smaller than block_size are processed with the largest power-of-2 divisor or left unrotated.
+    Guarantees exact energy preservation ||H w||_2^2 = ||w||_2^2 for any matrix shape.
+    """
+    def __init__(self, in_features: Optional[int] = None, block_size: int = 256, seed: int = 42, device: str = "cpu"):
+        self.block_size_req = block_size
+        self.seed = seed
+        self.device = device
+        self._initialized = False
+        if in_features is not None:
+            self._init_dims(in_features)
+
+    def _init_dims(self, in_features: int):
+        self.in_features = in_features
+        # Choose block size as power of 2 <= in_features
+        bs = 1
+        while bs * 2 <= min(self.block_size_req, in_features) and (bs * 2 & (bs * 2 - 1)) == 0:
+            bs *= 2
+        self.block_size = max(bs, 2)
+        self.num_full_blocks = in_features // self.block_size
+        self.remainder = in_features % self.block_size
+
+        # Generate signs for full block
+        gen = torch.Generator().manual_seed(self.seed)
+        self.signs = (torch.randint(0, 2, (self.block_size,), generator=gen, device=self.device).float() * 2.0 - 1.0)
+
+        # Precompute remainder power-of-2 blocks if remainder > 1
+        self.rem_blocks = []
+        rem_curr = self.remainder
+        while rem_curr > 1:
+            p2 = 1
+            while p2 * 2 <= rem_curr:
+                p2 *= 2
+            rem_signs = (torch.randint(0, 2, (p2,), generator=gen, device=self.device).float() * 2.0 - 1.0)
+            self.rem_blocks.append((p2, rem_signs))
+            rem_curr -= p2
+        self._initialized = True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Applies block-wise randomized Hadamard rotation."""
+        orig_shape = x.shape
+        d = orig_shape[-1]
+        if not self._initialized or self.in_features != d:
+            self._init_dims(d)
+        flat_x = x.reshape(-1, d)
+        out = flat_x.clone()
+
+        # Transform full blocks
+        block_span = self.num_full_blocks * self.block_size
+        if block_span > 0:
+            full_blocks = flat_x[:, :block_span].reshape(-1, self.num_full_blocks, self.block_size)
+            full_blocks_signed = full_blocks * self.signs.to(x.device).unsqueeze(0).unsqueeze(0)
+            rotated_blocks = fast_walsh_hadamard_transform(full_blocks_signed, normalize=True)
+            out[:, :block_span] = rotated_blocks.reshape(-1, block_span)
+
+        # Transform remainder with cascade of smaller power-of-2 blocks
+        offset = block_span
+        for p2, rem_signs in self.rem_blocks:
+            chunk = flat_x[:, offset:offset + p2]
+            chunk_signed = chunk * rem_signs.to(x.device).unsqueeze(0)
+            out[:, offset:offset + p2] = fast_walsh_hadamard_transform(chunk_signed, normalize=True)
+            offset += p2
+
+        return out.reshape(orig_shape)
+
+    def inverse(self, z: torch.Tensor) -> torch.Tensor:
+        """Inverts block-wise randomized Hadamard rotation."""
+        orig_shape = z.shape
+        d = orig_shape[-1]
+        if not self._initialized or self.in_features != d:
+            self._init_dims(d)
+        flat_z = z.reshape(-1, d)
+        out = flat_z.clone()
+
+        block_span = self.num_full_blocks * self.block_size
+        if block_span > 0:
+            full_blocks = flat_z[:, :block_span].reshape(-1, self.num_full_blocks, self.block_size)
+            unrotated = fast_walsh_hadamard_transform(full_blocks, normalize=True)
+            unrotated_signed = unrotated * self.signs.to(z.device).unsqueeze(0).unsqueeze(0)
+            out[:, :block_span] = unrotated_signed.reshape(-1, block_span)
+
+        offset = block_span
+        for p2, rem_signs in self.rem_blocks:
+            chunk = flat_z[:, offset:offset + p2]
+            unrot_chunk = fast_walsh_hadamard_transform(chunk, normalize=True)
+            out[:, offset:offset + p2] = unrot_chunk * rem_signs.to(z.device).unsqueeze(0)
+            offset += p2
+
+        return out.reshape(orig_shape)
+
+
+def verify_gaussian_concentration(
+    z_transformed: torch.Tensor,
+    dimension: int,
+    expected_sigma_sq: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Numerically validates Gaussian concentration of transformed vectors on thin spherical shells:
+    1. E[||z||_2^2] = d * sigma^2
+    2. Var(||z||_2^2) = 2 * d * sigma^4
+    3. Radial shell radius: R ~ sigma * sqrt(d)
+    4. Relative shell thickness: Delta R / R ~ 1 / sqrt(2 * d)
+    """
+    flat = z_transformed.detach().cpu().float().view(-1, dimension)
+    num_vectors = flat.shape[0]
+    if num_vectors < 2:
+        raise ValueError(f"Need at least 2 vectors to evaluate concentration variance, got {num_vectors}")
+
+    # Norm squared of each d-dimensional vector: ||z||_2^2
+    norms_sq = torch.sum(flat ** 2, dim=-1)
+    radii = torch.sqrt(torch.clamp(norms_sq, min=1e-15))
+
+    empirical_e_norm_sq = float(norms_sq.mean().item())
+    empirical_var_norm_sq = float(norms_sq.var().item())
+    empirical_mean_radius = float(radii.mean().item())
+    empirical_std_radius = float(radii.std().item())
+
+    # Theoretical sigma estimation (if not provided)
+    sigma_sq = expected_sigma_sq if expected_sigma_sq is not None else (empirical_e_norm_sq / float(dimension))
+    theoretical_e_norm_sq = dimension * sigma_sq
+    theoretical_var_norm_sq = 2.0 * dimension * (sigma_sq ** 2)
+    theoretical_mean_radius = math.sqrt(dimension * sigma_sq)
+    theoretical_relative_thickness = 1.0 / math.sqrt(2.0 * dimension)
+
+    error_e = abs(empirical_e_norm_sq - theoretical_e_norm_sq) / max(theoretical_e_norm_sq, 1e-12)
+    error_var = abs(empirical_var_norm_sq - theoretical_var_norm_sq) / max(theoretical_var_norm_sq, 1e-12)
+
+    return {
+        "dimension": dimension,
+        "num_vectors_evaluated": num_vectors,
+        "sigma_sq": sigma_sq,
+        "empirical_E_norm_sq": empirical_e_norm_sq,
+        "theoretical_E_norm_sq": theoretical_e_norm_sq,
+        "error_E_norm_sq": error_e,
+        "empirical_Var_norm_sq": empirical_var_norm_sq,
+        "theoretical_Var_norm_sq": theoretical_var_norm_sq,
+        "error_Var_norm_sq": error_var,
+        "empirical_mean_radius_R": empirical_mean_radius,
+        "theoretical_mean_radius_R": theoretical_mean_radius,
+        "empirical_relative_shell_thickness": empirical_std_radius / max(empirical_mean_radius, 1e-12),
+        "theoretical_relative_shell_thickness": theoretical_relative_thickness,
+        "concentrated_on_shell": error_e < 0.05 and error_var < 0.20
+    }
 
 
 def compute_distribution_diagnostics(w_orig: torch.Tensor, w_rot: torch.Tensor) -> Dict[str, Any]:

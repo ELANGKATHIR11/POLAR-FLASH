@@ -2,7 +2,7 @@
 POLAR-FLASH: Production Command-Line Interface (CLI)
 Implements Part VI Section 22 of the POLAR-FLASH Specification:
 - polarflash inspect <path>
-- polarflash quantize <path> --backend polar|e8|int4 --out <file.pflash>
+- polarflash quantize <path> --backend polar|e8|int4|int3|int2|int8|fp16|bf16 --out <file.pflash>
 - polarflash analyze-rate-distortion <path>
 - polarflash inspect-memory <file.pflash>
 - polarflash benchmark <file.pflash>
@@ -13,11 +13,6 @@ Implements Part VI Section 22 of the POLAR-FLASH Specification:
 
 import os
 import sys
-
-# Isolate CUDA unless explicitly requested to avoid allocator contention on low-spec systems
-if "--device" not in sys.argv or "cuda" not in sys.argv:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 import json
 import time
 import argparse
@@ -34,16 +29,20 @@ if str(ROOT_DIR) not in sys.path:
 
 from polarflash_core.formats.pflash_format import PFlashWriter, PFlashReader
 from polarflash_core.ingestion import ModelIngestionEngine
-from polarflash_quant.transforms.hadamard import RandomizedHadamardTransform, compute_distribution_diagnostics
+from polarflash_quant.transforms.hadamard import BlockHadamardTransform, RandomizedHadamardTransform, compute_distribution_diagnostics
 from polarflash_quant.polar.polar_quant import PolarQuant2D
 from polarflash_quant.lattice.e8_lattice import E8LatticeQuantizer
-from polarflash_quant.information_theory.rate_distortion import empirical_entropy, LayerRateAllocator
+from polarflash_quant.information_theory.rate_distortion import empirical_entropy, LayerRateAllocator, calculate_effective_bpw
 from polarflash_quant.residual.qjl import BitPackedQJLEstimator
 from polarflash_quant.calibration.fisher import SparseTernaryResidual
-from polarflash_quant.hardware.roofline import RooflineAnalyzer, MemoryFeasibilityGate, RTX_5060_LAPTOP, LOW_SPEC_4GB_DEVICE
+from polarflash_quant.hardware.roofline import (
+    RooflineAnalyzer, MemoryFeasibilityGate, RTX_5060_LAPTOP, LOW_SPEC_4GB_DEVICE, compute_energy_consumption
+)
+from polarflash_quant.unified_quantizer import UnifiedQuantizer
 from polarflash_rt.streaming.flash_streamer import FlashPageCoalescer, DoubleBufferPipeline
 from polarflash_rt.cpu.engine import PFlashCPUEngine
 from polarflash_rt.cuda.engine import PFlashCUDAEngine
+from polarflash_rt.auto_engine import AutoEngine, HardwareProbe
 from polarflash_rt.kv_cache.compressed_kv import CompressedKVCache
 from polarflash_rt.sparse.contextual_sparse import ContextualSparseFFN
 from polarflash_train.gradcodes.pv_gradcode import PVGradCodeOptimizer
@@ -67,7 +66,7 @@ def cmd_inspect(args):
             print(f"Metadata:          {json.dumps(reader.metadata, indent=2)}")
             print(f"Tensor Catalog:    {len(reader.tensor_catalog)} tensors registered")
             print(f"\nSample Tensors:")
-            for name, meta in list(reader.tensor_catalog.items())[:6]:
+            for name, meta in list(reader.tensor_catalog.items())[:8]:
                 print(f"  - {name}: shape={meta['shape']}, dtype={meta['dtype']}, size={meta['size']:,} bytes")
     else:
         print(f"Target directory inspection: {target}")
@@ -94,9 +93,8 @@ def cmd_quantize(args):
     print(f"Output: {out_path}")
     print(f"=======================================================")
 
-    # Check if input is a directory containing safetensors
     if os.path.isdir(in_path) and any(f.endswith(".safetensors") for f in os.listdir(in_path)):
-        print("[Ingestion Engine] Detected safetensors model checkpoint. Launching ingestion pipeline...")
+        print("[Ingestion Engine] Detected safetensors model checkpoint. Launching streaming ingestion...")
         engine = ModelIngestionEngine(page_alignment=4096)
         max_layers = getattr(args, "max_layers", None)
         res = engine.ingest_and_quantize(
@@ -114,7 +112,7 @@ def cmd_quantize(args):
         print(f"  - Total Time:        {res['elapsed_seconds']}s")
         return
 
-    # Standalone demo / synthetic layer quantization
+    # Synthetic block quantization demonstration
     writer = PFlashWriter(page_alignment=4096)
     writer.set_metadata({
         "generator": "polarflash-v1.0-production",
@@ -124,76 +122,71 @@ def cmd_quantize(args):
     })
 
     layer_dim = getattr(args, "dim", 512)
-    print(f"Processing weight blocks (dim={layer_dim}) with Hadamard Orthogonal Incoherence...")
-    rht = RandomizedHadamardTransform(dim=layer_dim, seed=42)
+    print(f"Processing synthetic weight blocks (dim={layer_dim}) with Hadamard Orthogonal Incoherence...")
+    uq = UnifiedQuantizer(backend=backend, hadamard_block_size=512, apply_hadamard=True)
 
-    projections = ["attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj", "mlp.gate_proj"]
+    projections = ["attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
     total_weights = 0
 
     with torch.no_grad():
         for name in projections:
             raw_w = torch.randn(layer_dim, layer_dim) * 0.02
-            rotated_w = rht.forward(raw_w)
+            payload, q_meta, w_hat = uq.quantize(raw_w, name=name)
 
-            if backend == "polar":
-                quantizer = PolarQuant2D(r_bits=4, theta_bits_base=4)
-                w_hat, q_meta = quantizer.quantize(rotated_w)
-                payload = w_hat.half().numpy().tobytes()
-                dtype = "polar4"
-            elif backend == "e8":
-                quantizer = E8LatticeQuantizer(search_steps=8)
-                w_hat, q_meta = quantizer.quantize(rotated_w)
-                payload = w_hat.half().numpy().tobytes()
-                dtype = "e8_lattice"
-            else:
-                scale = torch.max(torch.abs(rotated_w)) / 7.0
-                q_idx = torch.clamp(torch.round(rotated_w / scale), -8, 7).to(torch.int8)
-                payload = q_idx.numpy().tobytes()
-                dtype = "int4"
-                q_meta = {"scale": float(scale.item())}
-
-            writer.add_tensor(f"layer_0.{name}.weight", payload, shape=[layer_dim, layer_dim], dtype=dtype, quant_meta=q_meta)
+            writer.add_tensor(
+                name=f"layers.0.{name}.weight",
+                data_bytes=payload,
+                shape=[layer_dim, layer_dim],
+                dtype=q_meta.get("dtype", backend),
+                quant_meta=q_meta
+            )
             total_weights += raw_w.numel()
 
-    save_info = writer.save(out_path)
-    print(f"\n[SUCCESS] Serialized {save_info['num_tensors']} tensors to {out_path}")
-    print(f"Total Parameters:    {total_weights:,}")
-    print(f"Archive File Size:   {save_info['total_bytes']:,} bytes ({save_info['total_bytes'] / (1024**2):.2f} MB)")
-    print(f"Effective Bitrate:   {save_info['effective_bpw']:.3f} bits per parameter")
+    save_stats = writer.save(out_path)
+    print(f"\n[SUCCESS] Archive saved to {out_path}:")
+    print(f"  - Total Tensors:     {save_stats['num_tensors']}")
+    print(f"  - Total Parameters:  {save_stats['total_params']:,}")
+    print(f"  - File Size:         {save_stats['total_bytes'] / (1024**2):.2f} MB")
+    print(f"  - Effective Bitrate: {save_stats['effective_bpw']:.3f} bpw")
 
 
 def cmd_analyze_rate_distortion(args):
-    """Computes empirical entropy, R(D) bounds, and layer rate allocation."""
+    """Analyzes empirical and Shannon rate-distortion for weights."""
     target = args.path
     print(f"\n=======================================================")
-    print(f"POLAR-FLASH: Information-Theoretic Rate-Distortion Analysis")
+    print(f"POLAR-FLASH: Rate-Distortion & Information Theory Analysis")
     print(f"Target: {target}")
     print(f"=======================================================")
 
-    dummy_weights = torch.randn(1024, 1024) * 0.02
-    h_emp = empirical_entropy(dummy_weights)
-    print(f"[Empirical Shannon Entropy]: H(W) = {h_emp:.3f} bits / parameter")
+    w = torch.randn(2048, 2048) * 0.02
+    h_emp = empirical_entropy(w)
+    print(f"Empirical Weight Entropy: {h_emp:.3f} bits/symbol")
 
-    # Layer Rate Allocation across 12 transformer projections
-    layers = [f"layer_{i}.{p}" for i in range(4) for p in ["q_proj", "k_proj", "v_proj"]]
-    params = [1024 * 1024] * len(layers)
-    sensitivities = [1.0 + 0.1 * i for i in range(len(layers))]
-
-    allocator = LayerRateAllocator(layers, params, sensitivities)
-    allocation = allocator.allocate(target_bpw=1.75, min_bpw=1.2, max_bpw=3.0)
-
-    print("\n[Optimal Rate Allocation (Budget = 1.75 bpw)]:")
-    for name, rate in list(allocation.items())[:6]:
-        print(f"  - {name}: allocated R = {rate:.3f} bpw")
-    print("  ... (remaining layers allocated within budget)")
+    layer_sensitivities = {
+        "attn.q_proj": 1.2,
+        "attn.k_proj": 1.1,
+        "attn.v_proj": 0.9,
+        "attn.o_proj": 1.4,
+        "mlp.gate_proj": 0.8,
+        "mlp.up_proj": 0.8,
+        "mlp.down_proj": 1.3
+    }
+    names = list(layer_sensitivities.keys())
+    counts = [2048 * 2048] * len(names)
+    sens = list(layer_sensitivities.values())
+    allocator = LayerRateAllocator(layer_names=names, param_counts=counts, sensitivities=sens)
+    allocations = allocator.allocate(target_bpw=1.75)
+    print(f"\nOptimal Bit Allocation (Target: 1.75 bpw):")
+    for layer, bits in allocations.items():
+        print(f"  - {layer:<16}: {bits:.3f} bpw")
 
 
 def cmd_inspect_memory(args):
-    """Evaluates physical memory footprint and low-spec device feasibility."""
+    """Inspects physical memory accounting and feasibility gating."""
     target = args.pflash_path
     print(f"\n=======================================================")
-    print(f"POLAR-FLASH: Physical Memory & Feasibility Gate")
-    print(f"Target: {target}")
+    print(f"POLAR-FLASH: Physical Memory Footprint & Feasibility Audit")
+    print(f"Archive: {target}")
     print(f"=======================================================")
 
     gate_4gb = MemoryFeasibilityGate(hardware=LOW_SPEC_4GB_DEVICE)
@@ -202,7 +195,7 @@ def cmd_inspect_memory(args):
         effective_bpw=1.75,
         vision_projector_mb=340.0,
         context_tokens=8192,
-        kv_quant_bytes=1.0  # Q8 KV cache
+        kv_quant_bytes=1.0
     )
 
     print(f"\n--- Low-Spec 4GB Edge Device Profile ---")
@@ -226,7 +219,6 @@ def cmd_benchmark(args):
     print(f"Target: {target}")
     print(f"=======================================================")
 
-    # 1. Page Coalescing Benchmark
     coalescer = FlashPageCoalescer(physical_page_size=4096)
     aligned_res = coalescer.calculate_page_touches(offset=4096, length=65536)
     unaligned_res = coalescer.calculate_page_touches(offset=4000, length=200)
@@ -235,7 +227,6 @@ def cmd_benchmark(args):
     print(f"  - Aligned 64KB read:   Storage Utilization U = {aligned_res['storage_utilization_U'] * 100:.1f}%, Read Amplification A = {aligned_res['read_amplification_A']:.2f}x")
     print(f"  - Unaligned 200B read: Storage Utilization U = {unaligned_res['storage_utilization_U'] * 100:.2f}%, Read Amplification A = {unaligned_res['read_amplification_A']:.2f}x")
 
-    # 2. Double Buffering Pipeline
     pipeline = DoubleBufferPipeline(io_bandwidth_gb_s=5.0, compute_tflops=110.0)
     layers = [{"layer_id": f"layer_{i}", "tensor_bytes": 35 * (1024**2), "flops": 1.0e11} for i in range(36)]
     pipe_res = pipeline.simulate_pipeline(layers)
@@ -246,15 +237,15 @@ def cmd_benchmark(args):
 
 
 def cmd_benchmark_physics(args):
-    """Executes Roofline Model analysis and hardware operational intensity check."""
+    """Executes Roofline Model analysis and hardware energy estimation."""
     print(f"\n=======================================================")
-    print(f"POLAR-FLASH: Roofline Physical Limits Analysis")
+    print(f"POLAR-FLASH: Roofline Physical Limits & Energy Analysis")
     print(f"Target Device: {RTX_5060_LAPTOP.name}")
     print(f"=======================================================")
 
     analyzer = RooflineAnalyzer(hardware=RTX_5060_LAPTOP)
     res_dense = analyzer.calculate_attainable_performance(batch_size=1, seq_len=128, hidden_dim=2048, weight_bytes_per_param=2.0)
-    res_polar = analyzer.calculate_attainable_performance(batch_size=1, seq_len=128, hidden_dim=2048, weight_bytes_per_param=0.21875)  # 1.75 bpw
+    res_polar = analyzer.calculate_attainable_performance(batch_size=1, seq_len=128, hidden_dim=2048, weight_bytes_per_param=0.21875)
 
     print(f"\n--- FP16 (16-Bit) vs POLAR-FLASH (1.75 bpw) Roofline ---")
     print(f"FP16 Dense OI:        {res_dense['operational_intensity']:.2f} FLOPs/byte ({res_dense['regime']})")
@@ -262,14 +253,21 @@ def cmd_benchmark_physics(args):
     print(f"POLAR 1.75 bpw OI:    {res_polar['operational_intensity']:.2f} FLOPs/byte ({res_polar['regime']})")
     print(f"POLAR Attainable Perf:{res_polar['attainable_tflops']:.2f} TFLOPS ({res_polar['attainable_tflops'] / max(res_dense['attainable_tflops'], 1e-6):.2f}x throughput gain)")
 
+    # Energy modeling
+    energy = compute_energy_consumption(
+        num_flops=2.0 * 2048 * 2048 * 128,
+        bytes_transferred_vram=2048 * 2048 * 0.21875 + 2 * 128 * 2048 * 2.0
+    )
+    print(f"\n--- Physical Energy Consumption Model ---")
+    print(f"Total Energy:         {energy['total_energy_joules'] * 1e3:.4f} mJ")
+    print(f"Compute Energy:       {energy['compute_energy_percentage']:.1f}%")
+    print(f"Memory Energy:        {energy['memory_energy_percentage']:.1f}%")
+
 
 def cmd_run(args):
     """Executes prompt inference from memory-mapped .pflash container."""
     target = args.pflash_path
     device = args.device
-
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"\n=======================================================")
     print(f"POLAR-FLASH: Zero-Copy Runtime Inference Engine")
@@ -278,23 +276,22 @@ def cmd_run(args):
     print(f"=======================================================")
 
     if not os.path.exists(target):
-        # Create a sample pflash archive if not existing
         writer = PFlashWriter()
         writer.set_metadata({"arch": "polarflash-runtime-model"})
         w_sample = torch.randn(64, 64).half().numpy().tobytes()
         writer.add_tensor("layer_0.attn.q_proj.weight", w_sample, shape=[64, 64], dtype="polar4")
         writer.save(target)
 
-    if device == "cuda" and torch.cuda.is_available():
-        engine = PFlashCUDAEngine(target)
+    auto_eng = AutoEngine(target, prefer_device=device)
+    engine = auto_eng.select_engine()
+
+    if isinstance(engine, PFlashCUDAEngine):
         res = engine.benchmark_gpu_throughput(batch_size=1, seq_len=128)
         print(f"GPU Execution Result: {res}")
-        engine.close()
     else:
-        engine = PFlashCPUEngine(target)
         res = engine.benchmark_throughput(batch_size=1, seq_len=128)
         print(f"CPU Execution Result: {res}")
-        engine.close()
+    engine.close()
 
 
 def cmd_finetune(args):
@@ -307,12 +304,13 @@ def cmd_finetune(args):
     print(f"=======================================================")
 
     if method == "pv-gradcode":
-        # Demonstrate PV-GradCode V-step + P-step
         scale = torch.tensor([0.05], requires_grad=True)
         discrete_codes = torch.randint(-8, 8, (128, 128)).float()
         optimizer = PVGradCodeOptimizer([scale], discrete_codes, lr=1e-3, rollback_tolerance=0.01)
 
-        # Objective: minimize MSE with target weights
+        mem_breakdown = optimizer.compute_training_memory_bytes()
+        print(f"Training Memory Footprint: {mem_breakdown['total_training_overhead_mb']:.4f} MB")
+
         target_w = torch.randn(128, 128) * 0.1
         loss_fn = lambda c: torch.mean((c * scale - target_w) ** 2)
 
@@ -322,14 +320,12 @@ def cmd_finetune(args):
             optimizer.v_step(loss)
             print(f"  V-Step {i+1}: Loss = {loss.item():.6f}, scale = {scale.item():.5f}")
 
-        # P-step with pseudo-gradient
         code_grad = 2.0 * (discrete_codes * scale - target_w) * scale
         p_res = optimizer.p_step(objective_eval_fn=lambda c: float(loss_fn(c).item()), code_gradient=code_grad)
         print(f"  P-Step Result: Accepted = {p_res['accepted']}, New Loss = {p_res['candidate_loss']:.6f}")
         print(f"[SUCCESS] PV-GradCode convergence verified.")
 
     else:
-        # LoRA adaptation
         base = nn.Linear(256, 256, bias=False)
         lora = PolarLoRALinear(base, in_features=256, out_features=256, r=8)
         x = torch.randn(2, 16, 256)
@@ -351,7 +347,7 @@ def main():
     # quantize
     p_quant = subparsers.add_parser("quantize", help="Compress model with POLAR-FLASH")
     p_quant.add_argument("model_path", help="Input model path or safetensors directory")
-    p_quant.add_argument("--backend", default="polar", choices=["polar", "e8", "int4"], help="Quantization backend")
+    p_quant.add_argument("--backend", default="polar", choices=["polar", "e8", "int4", "int3", "int2", "int8", "fp16", "bf16"], help="Quantization backend")
     p_quant.add_argument("--dim", type=int, default=512, help="Projection dimension for synthetic test")
     p_quant.add_argument("--max-layers", type=int, default=None, help="Limit number of layers to process")
     p_quant.add_argument("--out", default="model.pflash", help="Output .pflash archive path")

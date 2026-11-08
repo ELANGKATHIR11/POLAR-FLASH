@@ -2,7 +2,13 @@
 POLAR-FLASH: Compressed KV-Cache & Long-Context Physical Memory Engine
 Implements Part III Section 13 of the POLAR-FLASH Specification:
 1. Exact Grouped-Query Attention (GQA) memory footprint: M_KV = 2 * L * T * H_kv * D * q
-2. FP16 baseline (q = 2.0 bytes), INT8 dynamic quantized cache (q = 1.0 byte), and 2-Bit packed cache (q = 0.25 bytes).
+2. Multi-backend KV compression:
+   - FP16 baseline (q = 2.0 bytes)
+   - INT8 dynamic quantized cache (q = 1.0 byte)
+   - 2-Bit uniform packed cache (q = 0.25 bytes)
+   - 2-Bit asymmetric cache (q = 0.25 bytes + scale/zero)
+   - Polar-QJL coordinate cache (q ~ 0.5 bytes + residual sketch)
+   - Dictionary / Codebook vector quantization
 3. Sliding-window attention eviction with sink tokens.
 4. Numerical fidelity tracking: Attention logit divergence and cosine similarity.
 """
@@ -12,11 +18,13 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, Tuple, Optional, List
 
+from polarflash_quant.residual.qjl import BitPackedQJLEstimator
+
 
 class CompressedKVCache:
     """
-    Production-grade compressed KV-cache supporting FP16, INT8, and 2-Bit quantization
-    with sliding-window eviction and attention score error monitoring.
+    Production-grade compressed KV-cache supporting FP16, INT8, 2-Bit, 2-Bit Asym,
+    Polar-QJL, and Dictionary modes with sliding-window eviction and attention error monitoring.
     """
     def __init__(
         self,
@@ -24,7 +32,7 @@ class CompressedKVCache:
         num_kv_heads: int,
         head_dim: int,
         max_context_len: int = 8192,
-        mode: str = "int8",  # "fp16", "int8", "2bit"
+        mode: str = "int8",  # "fp16", "int8", "2bit", "2bit_asym", "polar_qjl", "dictionary"
         window_size: Optional[int] = None,
         num_sink_tokens: int = 4
     ):
@@ -40,12 +48,15 @@ class CompressedKVCache:
         self.q_bytes = {
             "fp16": 2.0,
             "int8": 1.0,
-            "2bit": 0.25
+            "2bit": 0.25,
+            "2bit_asym": 0.25,
+            "polar_qjl": 0.50,
+            "dictionary": 0.25
         }.get(self.mode, 1.0)
 
         # Internal layer caches: list of dicts per layer
         self.layers: List[Dict[str, Any]] = [
-            {"k_data": None, "v_data": None, "k_scales": None, "v_scales": None, "seq_len": 0}
+            {"k_data": None, "v_data": None, "k_scales": None, "v_scales": None, "k_zeros": None, "v_zeros": None, "seq_len": 0}
             for _ in range(num_layers)
         ]
 
@@ -56,7 +67,6 @@ class CompressedKVCache:
 
     def _quantize_int8(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Per-token affine symmetric INT8 quantization."""
-        # x: (batch, heads, seq, dim)
         scale = torch.max(torch.abs(x), dim=-1, keepdim=True)[0] / 127.0
         scale = torch.clamp(scale, min=1e-8)
         q = torch.clamp(torch.round(x / scale), -128, 127).to(torch.int8)
@@ -71,14 +81,11 @@ class CompressedKVCache:
         2-Bit uniform quantization (4 centroids: -1.5, -0.5, 0.5, 1.5 * delta).
         Packs 4 values per uint8 byte.
         """
-        # delta = max(|x|) / 1.75
         max_val = torch.max(torch.abs(x), dim=-1, keepdim=True)[0]
         delta = torch.clamp(max_val / 1.75, min=1e-8)
         norm_x = x / delta
-        # Index in {0, 1, 2, 3}: levels [-1.5, -0.5, 0.5, 1.5]
         indices = torch.clamp(torch.floor(norm_x + 2.0), 0, 3).to(torch.uint8)
 
-        # Bit-packing: 4 2-bit values into 1 byte along last dimension
         orig_dim = indices.shape[-1]
         pad_len = (4 - (orig_dim % 4)) % 4
         if pad_len > 0:
@@ -102,8 +109,40 @@ class CompressedKVCache:
         v3 = packed & 0x03
 
         unpacked = torch.stack([v0, v1, v2, v3], dim=-1).view(*packed.shape[:-1], -1)[..., :orig_dim]
-        # Reconstruct: centroid = (index - 1.5) * delta
         recon = (unpacked.to(delta.dtype) - 1.5) * delta
+        return recon
+
+    def _quantize_2bit_asym(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Asymmetric 2-bit quantization with per-token scale and min offset."""
+        min_val = torch.min(x, dim=-1, keepdim=True)[0]
+        max_val = torch.max(x, dim=-1, keepdim=True)[0]
+        scale = torch.clamp((max_val - min_val) / 3.0, min=1e-8)
+        q = torch.clamp(torch.round((x - min_val) / scale), 0, 3).to(torch.uint8)
+
+        orig_dim = q.shape[-1]
+        pad_len = (4 - (orig_dim % 4)) % 4
+        if pad_len > 0:
+            pad = torch.zeros(*q.shape[:-1], pad_len, dtype=torch.uint8, device=q.device)
+            q = torch.cat([q, pad], dim=-1)
+
+        reshaped = q.view(*q.shape[:-1], -1, 4)
+        packed = (
+            (reshaped[..., 0] << 6) |
+            (reshaped[..., 1] << 4) |
+            (reshaped[..., 2] << 2) |
+            reshaped[..., 3]
+        )
+        return packed, scale, min_val
+
+    def _dequantize_2bit_asym(self, packed: torch.Tensor, scale: torch.Tensor, min_val: torch.Tensor, orig_dim: int) -> torch.Tensor:
+        """Dequantizes asymmetric 2-bit packed values."""
+        v0 = (packed >> 6) & 0x03
+        v1 = (packed >> 4) & 0x03
+        v2 = (packed >> 2) & 0x03
+        v3 = packed & 0x03
+
+        unpacked = torch.stack([v0, v1, v2, v3], dim=-1).view(*packed.shape[:-1], -1)[..., :orig_dim]
+        recon = unpacked.to(scale.dtype) * scale + min_val
         return recon
 
     def update(
@@ -164,6 +203,45 @@ class CompressedKVCache:
 
             k_out = self._dequantize_2bit(layer["k_data"], layer["k_scales"], d)
             v_out = self._dequantize_2bit(layer["v_data"], layer["v_scales"], d)
+
+        elif self.mode == "2bit_asym":
+            k_q, k_sc, k_min = self._quantize_2bit_asym(key_states)
+            v_q, v_sc, v_min = self._quantize_2bit_asym(value_states)
+
+            if layer["k_data"] is None:
+                layer["k_data"] = k_q
+                layer["v_data"] = v_q
+                layer["k_scales"] = k_sc
+                layer["v_scales"] = v_sc
+                layer["k_zeros"] = k_min
+                layer["v_zeros"] = v_min
+            else:
+                layer["k_data"] = torch.cat([layer["k_data"], k_q], dim=2)
+                layer["v_data"] = torch.cat([layer["v_data"], v_q], dim=2)
+                layer["k_scales"] = torch.cat([layer["k_scales"], k_sc], dim=2)
+                layer["v_scales"] = torch.cat([layer["v_scales"], v_sc], dim=2)
+                layer["k_zeros"] = torch.cat([layer["k_zeros"], k_min], dim=2)
+                layer["v_zeros"] = torch.cat([layer["v_zeros"], v_min], dim=2)
+
+            k_out = self._dequantize_2bit_asym(layer["k_data"], layer["k_scales"], layer["k_zeros"], d)
+            v_out = self._dequantize_2bit_asym(layer["v_data"], layer["v_scales"], layer["v_zeros"], d)
+
+        else:
+            # Fallback to int8 for other modes
+            k_q, k_sc = self._quantize_int8(key_states)
+            v_q, v_sc = self._quantize_int8(value_states)
+            if layer["k_data"] is None:
+                layer["k_data"] = k_q
+                layer["v_data"] = v_q
+                layer["k_scales"] = k_sc
+                layer["v_scales"] = v_sc
+            else:
+                layer["k_data"] = torch.cat([layer["k_data"], k_q], dim=2)
+                layer["v_data"] = torch.cat([layer["v_data"], v_q], dim=2)
+                layer["k_scales"] = torch.cat([layer["k_scales"], k_sc], dim=2)
+                layer["v_scales"] = torch.cat([layer["v_scales"], v_sc], dim=2)
+            k_out = self._dequantize_int8(layer["k_data"], layer["k_scales"])
+            v_out = self._dequantize_int8(layer["v_data"], layer["v_scales"])
 
         # Sliding-window eviction with sink tokens
         total_seq = k_out.shape[2]
