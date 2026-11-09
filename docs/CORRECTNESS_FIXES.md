@@ -118,3 +118,4 @@ During the Post-Transformation Correctness and Performance Audit, the codebase w
 
 #### Flaw B: Cache Lifetime Control
 - **Enhancement:** Added `keep_cached: bool` to `PolarLinearLayer` and `PFlashCUDAEngine`. Setting `keep_cached=False` enables streaming on-the-fly reconstruction with minimal working VRAM footprint.
+

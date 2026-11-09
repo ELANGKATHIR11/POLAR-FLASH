@@ -80,3 +80,4 @@ The long-term research target of **1.75 effective bits per parameter** was exper
    - Sparse ternary residual correction ($0.05\text{ bpw}$ active outliers).
    - 1-bit QJL sign-sketch inner product compensation ($\Delta \hat{y} = \frac{1}{m}(Sx)^T(Se)$).
 3. **Conclusion:** Sub-2-bit compression to 1.75 bpw is **not achievable with naive uniform scalar quantization**, but is **theoretically and empirically viable** using the hybrid Polar + QJL + Sparse residual architecture.
+

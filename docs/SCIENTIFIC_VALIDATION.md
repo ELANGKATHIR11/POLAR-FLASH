@@ -105,3 +105,4 @@ $$\min_{\theta, c} \mathcal{L}(\hat{W}(\theta, c))$$
 - **Monotonic Improvement Test:** Evaluated candidates with sub-threshold improvements ($\Delta \mathcal{L} < \epsilon_{\text{tol}}$) vs valid improvements.
   - **Result:** Sub-threshold candidates were rejected; valid candidates were accepted, achieving exact monotonic loss decrease.
 - **Autograd Memory Leak Prevention:** Verified that computation graphs are freed after each step when `retain_graph=False`. Re-running backward on previous loss tensors raises `RuntimeError`, confirming no uncollected memory leaks.
+
