@@ -4,7 +4,8 @@ Converting Any Open-Source LLM into High-Performance SLMs for Lower-Spec Edge Ha
 """
 
 from polarflash_quant.polar.polar_quant import (
-    PolarQuantizer, PolarQuant2D, RecursivePolarQuant, pack_polar_bits, unpack_polar_bits
+    PolarQuantizer, PolarQuant2D, RecursivePolarQuant, pack_polar_bits, unpack_polar_bits,
+    compare_polar_vs_e8_at_matched_bitrate
 )
 from polarflash_quant.residual.qjl import (
     QJLResidualEstimator, BitPackedQJLEstimator, XNORPopcountQJLEstimator, verify_qjl_unbiasedness_and_variance
@@ -44,7 +45,7 @@ from polarflash_train.lora.polar_lora import PolarLoRALinear
 from polarflash_train.qat.polar_qat import PolarQATLinear
 from polarflash_train.gradcodes.pv_gradcode import PVGradCodeOptimizer, TIESWeightMerger
 
-from polarflash_core.formats.pflash_format import PFlashWriter, PFlashReader
+from polarflash_core.formats.pflash_format import PFlashWriter, PFlashReader, PolarFlashBridge
 from polarflash_core.ingestion import ModelIngestionEngine
 from polarflash_bench.benchmark_suite import run_full_polarflash_benchmark
 
@@ -54,7 +55,7 @@ WalshHadamardTransform = RandomizedHadamardTransform
 FlashStreamer = DoubleBufferPipeline
 PolarCUDAEngine = PFlashCUDAEngine
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Kathir (Zenith AI)"
 __license__ = "Apache-2.0"
 
@@ -125,6 +126,8 @@ __all__ = [
     "TIESWeightMerger",
     "PFlashWriter",
     "PFlashReader",
+    "PolarFlashBridge",
+    "compare_polar_vs_e8_at_matched_bitrate",
     "ModelIngestionEngine",
     "run_full_polarflash_benchmark",
 ]

@@ -349,6 +349,260 @@ class RecursivePolarQuant:
 
         return recon, mse
 
+    def compute_adaptive_bit_allocation(self, target_bpw: float = 2.0) -> List[int]:
+        """
+        Computes radius-conditioned adaptive bit allocation across top radius and
+        hierarchical angles for a block of dimension d = self.block_size.
+        Guarantees exact budget match: sum(alloc) / d ~= target_bpw.
+        """
+        d = self.block_size
+        total_target_bits = int(round(d * target_bpw))
+        if d == 2:
+            r_b = max(2, total_target_bits // 2)
+            th_b = max(1, total_target_bits - r_b)
+            return [r_b, th_b]
+
+        r_bits = max(2, min(4, int(round(target_bpw + 1))))
+        remaining_bits = max(d - 1, total_target_bits - r_bits)
+
+        alloc = [r_bits]
+        num_angles = d - 1
+        base_bits = remaining_bits // num_angles
+        rem = remaining_bits % num_angles
+        for i in range(num_angles):
+            b = base_bits + (1 if i < rem else 0)
+            alloc.append(max(1, b))
+        while sum(alloc) < total_target_bits:
+            alloc[1] += 1
+        while sum(alloc) > total_target_bits and alloc[-1] > 1:
+            alloc[-1] -= 1
+        return alloc
+
+    def encode_packed(
+        self,
+        weights: torch.Tensor,
+        target_bpw: float = 2.0
+    ) -> Tuple[bytes, Dict[str, Any]]:
+        """
+        Recursively encodes a 2D weight matrix into a packed bitstream.
+        """
+        orig_shape = list(weights.shape)
+        device = weights.device
+        flat = weights.flatten()
+        pad_len = 0
+        rem = flat.numel() % self.block_size
+        if rem != 0:
+            pad_len = self.block_size - rem
+            flat = torch.cat([flat, torch.zeros(pad_len, dtype=flat.dtype, device=device)])
+
+        num_blocks = flat.numel() // self.block_size
+        flat_blocks = flat.view(num_blocks, self.block_size)
+
+        top_radius, angle_levels = self.forward_recursive(flat_blocks)
+        alloc = self.compute_adaptive_bit_allocation(target_bpw=target_bpw)
+        total_bits_per_block = sum(alloc)
+
+        # Quantize radius
+        r_bits = alloc[0]
+        r_max = float(torch.max(top_radius).item()) + self.epsilon
+        r_scale = r_max / float((1 << r_bits) - 1)
+        r_code = torch.clamp(torch.round(top_radius / r_scale), 0, (1 << r_bits) - 1).long()
+
+        # Quantize angles
+        angle_codes = []
+        angle_col = 1
+        for lvl_idx, angles in enumerate(angle_levels):
+            flat_angles = angles.view(num_blocks, -1)
+            for col_idx in range(flat_angles.shape[1]):
+                col_th = flat_angles[:, col_idx]
+                bits_th = alloc[angle_col]
+                levels_th = 1 << bits_th
+
+                if hasattr(self, "learned_codebooks") and self.learned_codebooks and lvl_idx < len(self.learned_codebooks):
+                    cb = self.learned_codebooks[lvl_idx].to(device)
+                    dists = torch.abs(col_th.unsqueeze(1) - cb.unsqueeze(0))
+                    c_idx = torch.argmin(dists, dim=1).long()
+                    angle_codes.append(c_idx)
+                elif lvl_idx == 0:
+                    norm_th = (col_th + math.pi) / (2.0 * math.pi)
+                    norm_th = torch.clamp(norm_th, 0.0, 1.0 - 1e-7)
+                    c_idx = torch.clamp(torch.floor(norm_th * levels_th), 0, levels_th - 1).long()
+                    angle_codes.append(c_idx)
+                else:
+                    norm_th = col_th / (0.5 * math.pi)
+                    norm_th = torch.clamp(norm_th, 0.0, 1.0 - 1e-7)
+                    c_idx = torch.clamp(torch.floor(norm_th * levels_th), 0, levels_th - 1).long()
+                    angle_codes.append(c_idx)
+
+                angle_col += 1
+
+        all_codes = [r_code] + angle_codes
+
+        # Bit pack blocks
+        acc = torch.zeros(num_blocks, dtype=torch.int64, device="cpu")
+        shift = 0
+        for i in range(len(alloc) - 1, -1, -1):
+            acc |= (all_codes[i].cpu() << shift)
+            shift += alloc[i]
+
+        total_bytes = (num_blocks * total_bits_per_block + 7) // 8
+        if total_bits_per_block % 8 == 0:
+            bytes_per_block = total_bits_per_block // 8
+            words = acc.numpy()
+            if bytes_per_block == 1:
+                packed_bytes = words.astype("u1").tobytes()
+            elif bytes_per_block == 2:
+                packed_bytes = words.astype(">u2").tobytes()
+            elif bytes_per_block == 4:
+                packed_bytes = words.astype(">u4").tobytes()
+            elif bytes_per_block == 8:
+                packed_bytes = words.astype(">u8").tobytes()
+            else:
+                packed_bytes = words.astype(">u8").tobytes()[:total_bytes]
+        else:
+            buffer = bytearray(total_bytes)
+            bit_cursor = 0
+            for block_idx in range(num_blocks):
+                val = int(acc[block_idx].item())
+                for b in range(total_bits_per_block - 1, -1, -1):
+                    bit = (val >> b) & 1
+                    byte_idx = bit_cursor // 8
+                    bit_offset = 7 - (bit_cursor % 8)
+                    buffer[byte_idx] |= (bit << bit_offset)
+                    bit_cursor += 1
+            packed_bytes = bytes(buffer)
+
+        exact_bpw = (len(packed_bytes) * 8.0) / float(weights.numel())
+
+        meta: Dict[str, Any] = {
+            "block_size": self.block_size,
+            "orig_shape": orig_shape,
+            "pad_len": pad_len,
+            "num_blocks": num_blocks,
+            "alloc": alloc,
+            "r_scale": r_scale,
+            "exact_bpw": exact_bpw,
+            "has_learned_codebooks": hasattr(self, "learned_codebooks") and bool(self.learned_codebooks)
+        }
+        return packed_bytes, meta
+
+    def decode_packed(
+        self,
+        packed_bytes: bytes,
+        meta: Dict[str, Any],
+        device: str = "cpu"
+    ) -> torch.Tensor:
+        """
+        Unpacks and reconstructs a 2D weight matrix from a packed bitstream.
+        """
+        num_blocks = meta["num_blocks"]
+        alloc = meta["alloc"]
+        total_bits_per_block = sum(alloc)
+
+        if total_bits_per_block % 8 == 0:
+            bytes_per_block = total_bits_per_block // 8
+            if bytes_per_block == 1:
+                words = torch.from_numpy(np.frombuffer(packed_bytes, dtype="u1").astype(np.int64))
+            elif bytes_per_block == 2:
+                words = torch.from_numpy(np.frombuffer(packed_bytes, dtype=">u2").astype(np.int64))
+            elif bytes_per_block == 4:
+                words = torch.from_numpy(np.frombuffer(packed_bytes, dtype=">u4").astype(np.int64))
+            elif bytes_per_block == 8:
+                words = torch.from_numpy(np.frombuffer(packed_bytes, dtype=">u8").astype(np.int64))
+            else:
+                words = torch.from_numpy(np.frombuffer(packed_bytes, dtype=">u8").astype(np.int64))
+        else:
+            words = torch.zeros(num_blocks, dtype=torch.int64)
+            buf = memoryview(packed_bytes)
+            bit_cursor = 0
+            for block_idx in range(num_blocks):
+                val = 0
+                for _ in range(total_bits_per_block):
+                    byte_idx = bit_cursor // 8
+                    bit_offset = 7 - (bit_cursor % 8)
+                    bit = (buf[byte_idx] >> bit_offset) & 1
+                    val = (val << 1) | bit
+                    bit_cursor += 1
+                words[block_idx] = val
+
+        # Extract codes
+        unpacked_codes = [None] * len(alloc)
+        shift = 0
+        for i in range(len(alloc) - 1, -1, -1):
+            mask = (1 << alloc[i]) - 1
+            unpacked_codes[i] = (words >> shift) & mask
+            shift += alloc[i]
+
+        # Reconstruct radius
+        r_scale = meta["r_scale"]
+        r_hat = unpacked_codes[0].float().to(device) * r_scale
+
+        # Reconstruct angles
+        angles_hat_list = []
+        d = self.block_size
+        angle_col = 1
+        level = 0
+        curr_d = d
+        while curr_d > 1:
+            num_angles_at_level = curr_d // 2
+            cols = []
+            for _ in range(num_angles_at_level):
+                c_idx = unpacked_codes[angle_col].to(device)
+                bits_th = alloc[angle_col]
+                levels_th = 1 << bits_th
+
+                if meta.get("has_learned_codebooks") and hasattr(self, "learned_codebooks") and self.learned_codebooks and level < len(self.learned_codebooks):
+                    cb = self.learned_codebooks[level].to(device)
+                    th = cb[torch.clamp(c_idx, 0, len(cb) - 1)]
+                elif level == 0:
+                    th = ((c_idx.float() + 0.5) / float(levels_th)) * (2.0 * math.pi) - math.pi
+                else:
+                    th = ((c_idx.float() + 0.5) / float(levels_th)) * (0.5 * math.pi)
+
+                cols.append(th)
+                angle_col += 1
+
+            level_angles = torch.stack(cols, dim=-1)
+            angles_hat_list.append(level_angles)
+            curr_d = curr_d // 2
+            level += 1
+
+        recon_blocks = self.inverse_recursive(r_hat, angles_hat_list)
+        flat_recon = recon_blocks.view(-1)
+        if meta["pad_len"] > 0:
+            flat_recon = flat_recon[:-meta["pad_len"]]
+
+        return flat_recon.reshape(meta["orig_shape"]).to(device)
+
+    def export_to_pflash(
+        self,
+        writer,
+        tensor_name: str,
+        tensor: torch.Tensor,
+        target_bpw: float = 2.0
+    ) -> Dict[str, Any]:
+        """Encodes tensor and registers payload in .pflash writer."""
+        packed_bytes, meta = self.encode_packed(tensor, target_bpw=target_bpw)
+        writer.add_tensor(
+            name=tensor_name,
+            data_bytes=packed_bytes,
+            shape=list(tensor.shape),
+            dtype="polar",
+            quant_meta=meta
+        )
+        return meta
+
+    def load_from_pflash(
+        self,
+        reader,
+        tensor_name: str,
+        device: str = "cpu"
+    ) -> torch.Tensor:
+        """Retrieves and decodes tensor from .pflash reader."""
+        packed_bytes = reader.get_tensor_bytes(tensor_name)
+        meta = reader.get_tensor_meta(tensor_name).get("quant_meta", {})
+        return self.decode_packed(packed_bytes, meta, device=device)
+
 
 class PolarQuantizer:
     """
@@ -425,6 +679,46 @@ class PolarQuantizer:
         r_codes, th_codes = unpack_polar_bits(packed_bytes, num_pairs, metadata["bits"], metadata["bits"], device=device)
         codes = torch.stack([r_codes, th_codes], dim=-1)
         return self.dequantize(codes, metadata)
+
+
+def compare_polar_vs_e8_at_matched_bitrate(weights: torch.Tensor, target_bpw: float = 2.0) -> Dict[str, Any]:
+    """
+    Compares PolarQuant and E8 Lattice Quantization at identical nominal bitrates.
+    Returns metrics including exact_bpw, mse, snr_db for both approaches.
+    """
+    from polarflash_quant.lattice.e8_lattice import E8ResidualVectorQuantizer
+
+    # 1. PolarQuant evaluation
+    rpq = RecursivePolarQuant(block_size=8)
+    packed_bytes, meta = rpq.encode_packed(weights, target_bpw=target_bpw)
+    recon_polar = rpq.decode_packed(packed_bytes, meta, device=str(weights.device))
+    mse_polar = float(torch.mean((weights - recon_polar) ** 2).item())
+    exact_bpw = meta["exact_bpw"]
+
+    signal_power = float(torch.mean(weights ** 2).item())
+    snr_polar = 10.0 * math.log10(max(signal_power / max(mse_polar, 1e-12), 1.0))
+
+    # 2. E8 Lattice evaluation
+    stages = max(1, int(round(target_bpw)))
+    e8_rvq = E8ResidualVectorQuantizer(num_stages=stages)
+    recon_e8, meta_e8 = e8_rvq.quantize(weights)
+    mse_e8 = meta_e8["total_mse"]
+    snr_e8 = meta_e8["snr_db"]
+
+    return {
+        "target_bpw": target_bpw,
+        "polar": {
+            "exact_bpw": exact_bpw,
+            "mse": mse_polar,
+            "snr_db": snr_polar
+        },
+        "e8": {
+            "exact_bpw": target_bpw,
+            "mse": mse_e8,
+            "snr_db": snr_e8
+        }
+    }
+
 
 
 

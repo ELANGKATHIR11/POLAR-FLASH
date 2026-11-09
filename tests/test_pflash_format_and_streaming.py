@@ -14,7 +14,7 @@ import os
 import torch
 import numpy as np
 
-from polarflash_core.formats.pflash_format import PFlashWriter, PFlashReader
+from polarflash_core.formats.pflash_format import PFlashWriter, PFlashReader, PolarFlashBridge
 from polarflash_rt.streaming.flash_streamer import DoubleBufferPipeline
 
 
@@ -66,6 +66,28 @@ def test_double_buffering_pipeline():
     res = pipeline.simulate_pipeline(layers)
     assert res["double_buffer_speedup"] > 1.0
     print(f"[PASS] Double-Buffering Pipeline speedup = {res['double_buffer_speedup']:.2f}x (Serial: {res['serial_time_s'] * 1000:.1f}ms, Pipelined: {res['pipelined_time_s'] * 1000:.1f}ms)")
+
+
+def test_polarflash_bridge_inspection_and_throughput(tmp_path):
+    """Verifies PolarFlashBridge inspection, streaming, and throughput profiling."""
+    test_file = str(tmp_path / "test_bridge.pflash")
+    writer = PFlashWriter()
+    writer.set_metadata({"source": "bridge_unit_test", "version": 1})
+    data = b"\xAA" * 1024
+    writer.add_tensor("layer.0.weight", data, shape=[32, 32], dtype="polar", quant_meta={"snr_db": 18.0})
+    writer.save(test_file)
+
+    bridge = PolarFlashBridge(default_pflash_path=test_file)
+    info = bridge.inspect_archive()
+    assert info["tensor_count"] == 1
+    assert info["total_weight_elements"] == 1024
+    assert info["effective_bpw"] > 0
+
+    read_data = bridge.stream_tensor("layer.0.weight")
+    assert read_data == data
+
+    bench = bridge.benchmark_streaming_throughput(iterations=5)
+    assert bench["throughput_mb_per_sec"] > 0
 
 
 if __name__ == "__main__":

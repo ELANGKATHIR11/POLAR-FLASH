@@ -9,7 +9,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)](https://www.python.org/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2%2B-orange.svg)](https://pytorch.org/)
 [![CI](https://github.com/ELANGKATHIR11/POLAR-FLASH/actions/workflows/ci.yml/badge.svg)](https://github.com/ELANGKATHIR11/POLAR-FLASH/actions)
-[![Tests Passing](https://img.shields.io/badge/Tests-99%2F99%20Passing-success.svg)](tests/)
+[![Tests Passing](https://img.shields.io/badge/Tests-100%2F100%20Passing-success.svg)](tests/)
 [![Target Rate](https://img.shields.io/badge/Target%20Rate-1.75%20bpw-purple.svg)](docs/MATHEMATICAL_FOUNDATIONS.md)
 [![Native CUDA](https://img.shields.io/badge/CUDA-Native%20Low--Bit%20sm__120-green.svg)](polarflash_rt/cuda/native_kernels.py)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-ELANGKATHIR11%2FPOLAR--FLASH-blue)](https://github.com/ELANGKATHIR11/POLAR-FLASH)
@@ -224,7 +224,7 @@ cd POLAR-FLASH
 pip install -e .
 ```
 
-### 2. Verify Test Suite (99/99 Tests Passing)
+### 2. Verify Test Suite (100/100 Tests Passing)
 
 ```bash
 python -m pytest tests -v
@@ -293,6 +293,37 @@ cache = CompressedKVCache(num_layers=36, num_kv_heads=8, head_dim=128, mode="2bi
 k = torch.randn(1, 8, 16, 128)
 v = torch.randn(1, 8, 16, 128)
 k_recon, v_recon = cache.update(layer_idx=0, key_states=k, value_states=v)
+```
+
+### 5. Memory-Mapped Streaming Bridge & Disk Inspection
+
+```python
+from polarflash import PolarFlashBridge
+
+bridge = PolarFlashBridge()
+# Inspect archive layout, tensor catalog, and compression ratios
+info = bridge.inspect_archive("model.pflash")
+print(f"Effective bpw: {info['effective_bpw']}, Ratio vs FP16: {info['compression_ratio_vs_fp16']}x")
+
+# Stream individual tensor payload without materializing full model into RAM
+raw_bytes = bridge.stream_tensor("model.layers.0.self_attn.q_proj.weight", "model.pflash")
+
+# Benchmark mmap storage retrieval throughput
+bench = bridge.benchmark_streaming_throughput("model.pflash", iterations=10)
+print(f"Throughput: {bench['throughput_mb_per_sec']} MB/s")
+```
+
+### 6. PolarQuant vs. E8 Lattice Matched-Bitrate Comparison
+
+```python
+import torch
+from polarflash import compare_polar_vs_e8_at_matched_bitrate
+
+weights = torch.randn(256, 256, dtype=torch.float32)
+# Compare PolarQuant and E8 RVQ at exact matching bitrates (e.g. 2.0 bpw)
+results = compare_polar_vs_e8_at_matched_bitrate(weights, target_bpw=2.0)
+print(f"PolarQuant MSE: {results['polar']['mse']:.6f}, SNR: {results['polar']['snr_db']:.2f} dB")
+print(f"E8 Lattice MSE: {results['e8']['mse']:.6f}, SNR: {results['e8']['snr_db']:.2f} dB")
 ```
 
 ---
