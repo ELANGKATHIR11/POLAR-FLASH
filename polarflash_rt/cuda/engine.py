@@ -8,10 +8,17 @@ Implements Part III & VI of the POLAR-FLASH Specification:
 """
 
 import os
+import gc
 import time
 import torch
 import torch.nn as nn
+from collections import OrderedDict
 from typing import Dict, Any, List, Optional
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 from polarflash_core.formats.pflash_format import PFlashReader
 from polarflash_rt.cpu.engine import PolarLinearLayer
@@ -24,47 +31,152 @@ class PFlashCUDAEngine:
     - 2-Stage Execution: On-the-fly dequantization of packed .pflash weights followed by CuBLAS Tensor-Core GEMM.
     - Transparent Hardware Classification: Weights remain packed in container and host storage,
       and are unpacked into working VRAM buffers during inference. This is not a low-bit fused kernel.
+    - Zero-copy memoryview storage access with lazy on-demand instantiation and LRU eviction.
     - Pinned memory transfers via CUDA streams.
     """
-    def __init__(self, pflash_path: str, device: str = "cuda:0", keep_cached: bool = True):
+    def __init__(
+        self,
+        pflash_path: str,
+        device: str = "cuda:0",
+        lazy: bool = True,
+        max_cached_layers: Optional[int] = None,
+        memory_budget_mb: Optional[float] = None,
+        keep_cached: bool = True
+    ):
         self.pflash_path = pflash_path
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.reader = PFlashReader(pflash_path)
+        self.lazy = lazy
+        self.max_cached_layers = max_cached_layers
+        self.memory_budget_mb = memory_budget_mb
         self.keep_cached = keep_cached
-        self.layers: Dict[str, PolarLinearLayer] = {}
-        self.stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
-        self._build_layers()
 
-    def _build_layers(self):
-        """Constructs layers and prepares them for GPU execution."""
-        for tensor_name, meta in self.reader.tensor_catalog.items():
-            shape = meta["shape"]
-            if len(shape) == 2:
-                out_f, in_f = shape[0], shape[1]
-                tensor_bytes = self.reader.get_tensor_bytes(tensor_name)
-                layer = PolarLinearLayer(
-                    in_features=in_f,
-                    out_features=out_f,
-                    dtype=meta["dtype"],
-                    quant_meta=meta["quant_meta"],
-                    raw_bytes=tensor_bytes,
-                    keep_cached=self.keep_cached
-                )
-                self.layers[tensor_name] = layer
+        # LRU layer cache
+        self.layers: OrderedDict[str, PolarLinearLayer] = OrderedDict()
+        self.stream = torch.cuda.Stream(device=self.device) if self.device.type == "cuda" else None
+
+        if not self.lazy:
+            self._build_all_layers()
+
+    def _build_all_layers(self):
+        """Eagerly instantiates all linear layers from catalog."""
+        for tensor_name in self.reader.tensor_catalog.keys():
+            self.get_layer(tensor_name)
+
+    def get_layer(self, layer_name: str) -> PolarLinearLayer:
+        """
+        Retrieves layer with on-demand zero-copy memoryview instantiation
+        and LRU cache eviction when capacity or VRAM limits are reached.
+        """
+        if layer_name in self.layers:
+            self.layers.move_to_end(layer_name)
+            return self.layers[layer_name]
+
+        if layer_name not in self.reader.tensor_catalog:
+            raise KeyError(f"Layer '{layer_name}' not registered in .pflash catalog.")
+
+        # Evict oldest layers if cache limit reached
+        if self.max_cached_layers is not None and len(self.layers) >= self.max_cached_layers:
+            self.evict_oldest_layer()
+
+        # Evict if VRAM budget is exceeded
+        if self.memory_budget_mb is not None and self.device.type == "cuda":
+            current_vram = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            while current_vram > self.memory_budget_mb and self.layers:
+                self.evict_oldest_layer()
+                current_vram = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+
+        meta = self.reader.tensor_catalog[layer_name]
+        shape = meta["shape"]
+        if len(shape) != 2:
+            raise ValueError(f"Tensor '{layer_name}' is not 2D linear weight (shape: {shape})")
+
+        out_f, in_f = shape[0], shape[1]
+        # Zero-copy memoryview slice directly referencing mmap
+        tensor_view = self.reader.get_tensor_view(layer_name, verify_checksum=False)
+
+        layer = PolarLinearLayer(
+            in_features=in_f,
+            out_features=out_f,
+            dtype=meta["dtype"],
+            quant_meta=meta["quant_meta"],
+            raw_bytes=tensor_view,
+            keep_cached=self.keep_cached
+        )
+        self.layers[layer_name] = layer
+        return layer
+
+    def evict_oldest_layer(self) -> Optional[str]:
+        """Evicts the least recently used layer to reclaim VRAM."""
+        if not self.layers:
+            return None
+        oldest_name, oldest_layer = self.layers.popitem(last=False)
+        oldest_layer.clear_cache()
+        del oldest_layer
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        return oldest_name
+
+    def evict_layer(self, layer_name: str):
+        """Explicitly evicts a specified layer."""
+        if layer_name in self.layers:
+            layer = self.layers.pop(layer_name)
+            layer.clear_cache()
+            del layer
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
     def forward_layer(self, layer_name: str, x: torch.Tensor) -> torch.Tensor:
         """Executes a layer forward pass on the target device."""
-        if layer_name not in self.layers:
-            raise KeyError(f"Layer '{layer_name}' not found.")
-        layer = self.layers[layer_name]
+        layer = self.get_layer(layer_name)
         x_dev = x.to(self.device)
         if self.stream is not None:
             with torch.cuda.stream(self.stream):
                 out = layer(x_dev)
             self.stream.synchronize()
-            return out
         else:
-            return layer(x_dev)
+            out = layer(x_dev)
+
+        if not self.keep_cached:
+            layer.clear_cache()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        return out
+
+    def get_resident_memory_stats(self) -> Dict[str, Any]:
+        """Measures actual resident Host RAM and CUDA VRAM allocations."""
+        vram_allocated_mb = 0.0
+        vram_peak_mb = 0.0
+        if self.device.type == "cuda":
+            vram_allocated_mb = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            vram_peak_mb = torch.cuda.max_memory_allocated(self.device) / (1024 ** 2)
+
+        rss_mb = 0.0
+        if psutil is not None:
+            try:
+                rss_mb = psutil.Process().memory_info().rss / (1024 ** 2)
+            except Exception:
+                pass
+
+        return {
+            "device": str(self.device),
+            "resident_host_ram_mb": round(rss_mb, 2),
+            "cuda_vram_allocated_mb": round(vram_allocated_mb, 2),
+            "cuda_vram_peak_mb": round(vram_peak_mb, 2),
+            "num_active_cached_layers": len(self.layers),
+            "total_catalog_layers": len(self.reader.tensor_catalog),
+            "cached_layer_names": list(self.layers.keys())
+        }
+
+    def reclaim_memory(self):
+        """Flushes all decoded weight buffers, drops layer handles, and triggers CUDA cache release."""
+        for layer in self.layers.values():
+            layer.clear_cache()
+        self.layers.clear()
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     def benchmark_gpu_throughput(
         self,
@@ -73,11 +185,11 @@ class PFlashCUDAEngine:
         iterations: int = 20
     ) -> Dict[str, Any]:
         """Measures GPU latency, memory footprint, and achieved TFLOPS."""
-        if not self.layers:
+        if not self.reader.tensor_catalog:
             return {"error": "No linear layers found."}
 
-        first_layer_name = list(self.layers.keys())[0]
-        layer = self.layers[first_layer_name]
+        first_layer_name = list(self.reader.tensor_catalog.keys())[0]
+        layer = self.get_layer(first_layer_name)
         dummy_input = torch.randn(batch_size, seq_len, layer.in_features, device=self.device)
 
         # Warmup
@@ -126,6 +238,7 @@ class PFlashCUDAEngine:
         }
 
     def close(self):
+        self.reclaim_memory()
         self.reader.close()
 
     def __enter__(self):

@@ -226,6 +226,16 @@ class PFlashReader:
 
             self.tensor_catalog[t_name] = t
 
+    @property
+    def catalog(self) -> Dict[str, Dict[str, Any]]:
+        return self.tensor_catalog
+
+    def get_tensor_meta(self, name: str) -> Dict[str, Any]:
+        self._ensure_open()
+        if name not in self.tensor_catalog:
+            raise KeyError(f"Tensor '{name}' not found in .pflash archive")
+        return self.tensor_catalog[name]
+
     def _ensure_open(self):
         if self._closed:
             raise RuntimeError(f"Operation attempted on closed PFlashReader ({self.filepath})")

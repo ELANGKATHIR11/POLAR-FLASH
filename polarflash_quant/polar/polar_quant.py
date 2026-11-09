@@ -271,6 +271,34 @@ class RecursivePolarQuant:
 
         return curr_r
 
+    def fit_codebooks(self, sample_weights: torch.Tensor, iters: int = 15):
+        """
+        Learns optimal non-uniform Lloyd-Max angular centroids for each hierarchical level
+        of the recursive polar decomposition.
+        """
+        flat_blocks = sample_weights.detach().cpu().view(-1, self.block_size)
+        _, angle_levels = self.forward_recursive(flat_blocks)
+
+        self.learned_codebooks = []
+        for lvl_idx, angles in enumerate(angle_levels):
+            flat_angles = angles.flatten()
+            if lvl_idx == 0:
+                # Level 0 in [-pi, pi]
+                centroids = torch.linspace(-math.pi + 1e-3, math.pi - 1e-3, self.angle_levels)
+            else:
+                # Upper levels in [0, pi/2]
+                centroids = torch.linspace(1e-3, 0.5 * math.pi - 1e-3, self.angle_levels)
+
+            for _ in range(iters):
+                dists = torch.abs(flat_angles.unsqueeze(1) - centroids.unsqueeze(0))
+                assign = torch.argmin(dists, dim=1)
+                for k in range(self.angle_levels):
+                    pts = flat_angles[assign == k]
+                    if len(pts) > 0:
+                        centroids[k] = pts.mean()
+
+            self.learned_codebooks.append(torch.sort(centroids)[0])
+
     def quantize_block(self, block: torch.Tensor) -> Tuple[torch.Tensor, float]:
         """
         Quantizes an individual block (or batch of blocks) of dimension d = self.block_size.
@@ -294,7 +322,13 @@ class RecursivePolarQuant:
         # Quantize each level of angles
         angles_hat = []
         for level_idx, angles in enumerate(angle_levels):
-            if level_idx == 0:
+            if hasattr(self, "learned_codebooks") and self.learned_codebooks and level_idx < len(self.learned_codebooks):
+                cb = self.learned_codebooks[level_idx].to(block.device)
+                flat_th = angles.view(-1)
+                dists = torch.abs(flat_th.unsqueeze(1) - cb.unsqueeze(0))
+                th_q = torch.argmin(dists, dim=1)
+                th_hat = cb[th_q].view_as(angles)
+            elif level_idx == 0:
                 # [-pi, pi]
                 norm_th = (angles + math.pi) / (2.0 * math.pi)
                 norm_th = torch.clamp(norm_th, 0.0, 1.0 - 1e-7)

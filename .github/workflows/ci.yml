@@ -1,0 +1,131 @@
+name: POLAR-FLASH Continuous Integration & Scientific Verification
+
+on:
+  push:
+    branches: [ main, v1.1-native-execution ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-matrix:
+    name: Test (${{ matrix.os }} - Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install Build & Test Dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel pytest pytest-cov
+
+      - name: Install Package in Editable Mode
+        run: |
+          pip install -e .
+
+      - name: Run Core Test Suite
+        run: |
+          pytest tests/ -v --durations=10
+
+  numerical-regression:
+    name: Numerical Regression & Mathematical Correctness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run Mathematical Foundations Test Suite
+        run: |
+          pytest tests/test_milestone0_math_verification.py -v
+          pytest tests/test_polarquant_codec_complete.py -v
+          pytest tests/test_phase2_to_phase8_complete.py -v
+
+  binary-adversarial:
+    name: Binary Container Adversarial Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run Binary Format & Truncation Adversarial Tests
+        run: |
+          pytest tests/test_pflash_adversarial_verification.py -v
+          pytest tests/test_pflash_format_and_streaming.py -v
+
+  package-installation:
+    name: Clean Package Build & Isolated Install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Build Tooling
+        run: |
+          python -m pip install --upgrade pip build wheel virtualenv
+
+      - name: Build SDist and Wheel
+        run: |
+          python -m build
+
+      - name: Install Wheel in Isolated Environment
+        run: |
+          python -m virtualenv clean_env
+          . clean_env/bin/activate
+          pip install dist/*.whl
+          python -c "import polarflash_core; print('Package loaded:', polarflash_core.__file__)"
+          python -m polarflash_core.cli --help
+
+  cuda-verification:
+    name: Low-Bit CUDA Kernel Verification
+    runs-on: [self-hosted, gpu]
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Native CUDA Tests
+        run: |
+          pytest tests/test_native_cuda_kernels.py -v
+

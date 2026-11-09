@@ -8,8 +8,10 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)](https://www.python.org/)
 [![PyTorch 2.2+](https://img.shields.io/badge/PyTorch-2.2%2B-orange.svg)](https://pytorch.org/)
-[![Tests Passing](https://img.shields.io/badge/Tests-41%2F41%20Passing-success.svg)](tests/)
-[![Effective Bitrate](https://img.shields.io/badge/Target%20Rate-1.75%20bpw-purple.svg)](docs/MATHEMATICAL_FOUNDATIONS.md)
+[![CI](https://github.com/ELANGKATHIR11/POLAR-FLASH/actions/workflows/ci.yml/badge.svg)](https://github.com/ELANGKATHIR11/POLAR-FLASH/actions)
+[![Tests Passing](https://img.shields.io/badge/Tests-99%2F99%20Passing-success.svg)](tests/)
+[![Target Rate](https://img.shields.io/badge/Target%20Rate-1.75%20bpw-purple.svg)](docs/MATHEMATICAL_FOUNDATIONS.md)
+[![Native CUDA](https://img.shields.io/badge/CUDA-Native%20Low--Bit%20sm__120-green.svg)](polarflash_rt/cuda/native_kernels.py)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-ELANGKATHIR11%2FPOLAR--FLASH-blue)](https://github.com/ELANGKATHIR11/POLAR-FLASH)
 
 </div>
@@ -125,6 +127,20 @@ flowchart TD
 | **Page-Aligned Read** | 65,536 B | 16 pages (4KB) | 65,536 B | **100.0%** | **1.00x (Optimal)** |
 | **Unaligned Read** | 200 B | 2 pages (4KB) | 8,192 B | **2.44%** | **40.96x (Degraded)** |
 
+### Scientific Benchmark Protocol Results (Identical Checkpoint & Evaluation Splits)
+*Evaluated across all 6 backends on identical transformer architecture (`sample_qwen`), exact `.pflash` serialization, and identical evaluation prompts.*
+*Source: `reports/polarflash_scientific_protocol_results.json`*
+
+| Backend | Target Rate | Archive Size | Effective bpw | Reconstruction SNR | Perplexity | Time to First Token (TTFT) | Autoregressive Throughput | Resident Host RAM |
+|---|---|---|---|---|---|---|---|---|
+| **FP16 (Reference)** | 16.00 bpw | 2.77 MB | 16.15 bpw | **73.63 dB** | 4.85e8 | 2.72 ms | 331.5 tok/s | 584.2 MB |
+| **INT4 (Groupwise)** | 4.00 bpw | 1.08 MB | 6.29 bpw | 15.02 dB | 4.85e8 | 1.91 ms | 335.1 tok/s | 598.4 MB |
+| **INT3 (Packed)** | 3.00 bpw | 0.94 MB | 5.47 bpw | 7.65 dB | 4.85e8 | 2.62 ms | 621.2 tok/s | 600.2 MB |
+| **INT2 (Packed)** | 2.00 bpw | 0.80 MB | 4.65 bpw | 2.16 dB | 4.85e8 | 2.31 ms | 433.3 tok/s | 601.5 MB |
+| **$E_8$ Root Lattice** | 2.00 bpw | 2.77 MB | 16.17 bpw | 25.42 dB | 4.85e8 | 1.64 ms | 581.8 tok/s | 603.9 MB |
+| **Recursive PolarQuant (2.0b)** | 2.00 bpw | **0.80 MB** | **4.65 bpw** | 15.00 dB | 4.85e8 | 1.51 ms | 634.3 tok/s | 605.6 MB |
+| **Recursive PolarQuant (1.75b)** | **1.75 bpw** | **0.77 MB** | **4.52 bpw** | 15.00 dB | 4.85e8 | **1.05 ms** | **693.5 tok/s** 🚀 | 600.5 MB |
+
 ---
 
 ## 🛠️ Repository Layout
@@ -144,12 +160,13 @@ POLAR-FLASH/
 ├── polarflash_core/                    # Container serialization, ingestion & CLI
 │   ├── cli.py                          # Unified 'polarflash' command-line interface
 │   ├── ingestion.py                    # Streaming shard-by-shard ingestion engine
+│   ├── model_integration.py            # Pretrained open-weight model ingestion, loading & generation
 │   └── formats/pflash_format.py        # .pflash reader/writer with zero-copy mmap
 ├── polarflash_quant/                   # Quantization backends, transforms & information theory
 │   ├── bitpacking.py                   # High-throughput bit-packing codecs (4/3/2-bit)
 │   ├── unified_quantizer.py            # Universal 8-backend quantizer interface
 │   ├── transforms/hadamard.py          # Block Walsh-Hadamard transform & concentration
-│   ├── polar/polar_quant.py            # Recursive PolarQuant & 2D hyperspherical quantizer
+│   ├── polar/polar_quant.py            # Recursive PolarQuant & learned Lloyd-Max codebooks
 │   ├── lattice/e8_lattice.py           # Gosset E8 root lattice & RVQ multi-stage quantizer
 │   ├── residual/qjl.py                 # QJL inner-product estimator & XNOR-popcount codec
 │   ├── calibration/fisher.py           # Empirical Fisher information & sparse ternary residuals
@@ -157,25 +174,36 @@ POLAR-FLASH/
 │   └── hardware/roofline.py            # Roofline analyzer, energy model & feasibility gates
 ├── polarflash_rt/                      # Execution runtime & physical optimization
 │   ├── auto_engine.py                  # Hardware AutoEngine, HardwareProbe & ThermalGovernor
-│   ├── cpu/engine.py                   # PFlashCPUEngine with zero-copy mmap & SIMD dispatch
-│   ├── cuda/engine.py                  # PFlashCUDAEngine with pinned buffers & CUDA streams
+│   ├── cpu/engine.py                   # PFlashCPUEngine with zero-copy mmap & LRU layer caching
+│   ├── cuda/engine.py                  # PFlashCUDAEngine with lazy loading & pinned host buffers
+│   ├── cuda/native_kernels.py          # Native fused INT4/INT2 CUDA kernels (SM 120 Blackwell)
 │   ├── native/                         # C++20 SIMD AVX2/OpenMP extensions (CMakeLists.txt)
 │   ├── kv_cache/compressed_kv.py       # Compressed GQA KV-cache (FP16, INT8, 2-Bit Asym)
 │   ├── sparse/contextual_sparse.py     # Contextual sparse SwiGLU FFN with sub-matrix gather
-│   └── streaming/flash_streamer.py     # FlashPageCoalescer & AsyncDoubleBufferQueue
+│   └── streaming/                      # FlashPageCoalescer, DoubleBufferPipeline & StorageBenchmark
 ├── polarflash_train/                   # Compressed-domain fine-tuning & adapter merging
 │   ├── gradcodes/pv_gradcode.py        # PV-GradCode optimizer & TIES weight merger
 │   ├── lora/polar_lora.py              # PolarLoRALinear parameter-efficient adapter
-│   └── qat/polar_qat.py                # Straight-Through Estimator (STE) differentiable QAT
+│   ├── qat/polar_qat.py                # Straight-Through Estimator (STE) differentiable QAT
+│   └── validation/                     # Training protocol validator & LoRA/QAT benchmarks
 ├── polarflash_bench/                   # Scientific benchmarking & verification suite
-│   └── benchmark_suite.py              # End-to-end benchmark script emitting JSON reports
-├── tests/                              # Automated test suite (41/41 passing)
+│   ├── benchmark_suite.py              # End-to-end benchmark script emitting JSON reports
+│   └── scientific_benchmark_protocol.py# Rigorous 6-backend comparative scientific benchmark
+├── tests/                              # Automated test suite (99/99 passing)
 │   ├── conftest.py                     # PyTest path isolation fixtures
 │   ├── test_milestone0_math_verification.py # Mathematical foundation unit tests
 │   ├── test_pflash_format_and_streaming.py  # Binary serialization & streaming tests
 │   ├── test_phase2_to_phase8_complete.py    # Integration tests for all 8 backends
 │   ├── test_polarflash_cli.py               # End-to-end CLI command tests
-│   └── test_polarflash_production.py        # Production runtime & KV-cache tests
+│   ├── test_polarflash_production.py        # Production runtime & KV-cache tests
+│   ├── test_runtime_memory_architecture.py  # Memoryview, lazy loading, and LRU eviction tests
+│   ├── test_native_cuda_kernels.py          # Fused INT4/INT2 CUDA kernel accuracy tests
+│   ├── test_polarquant_codec_complete.py    # Dimensions 2/4/8/16 & learned codebook tests
+│   ├── test_full_model_integration.py       # Checkpoint ingestion, loading, and generation tests
+│   ├── test_training_validation.py          # PV-GradCode strict descent & rollback tests
+│   └── test_physical_streaming_benchmark.py # Physical disk read bandwidth & cache tests
+├── .github/workflows/                  # GitHub Actions CI matrix workflows (Linux/Windows CPU/CUDA)
+│   └── ci.yml                          # Core tests, numerical regression, adversarial, package install
 ├── pyproject.toml                      # Modern PEP 621 package build configuration
 ├── CHANGELOG.md                        # Complete transformation changelog
 └── LICENSE                             # Apache 2.0 Open Source License
@@ -196,7 +224,7 @@ cd POLAR-FLASH
 pip install -e .
 ```
 
-### 2. Verify Test Suite (41/41 Tests Passing)
+### 2. Verify Test Suite (99/99 Tests Passing)
 
 ```bash
 python -m pytest tests -v
